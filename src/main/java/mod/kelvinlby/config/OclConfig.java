@@ -40,8 +40,13 @@ public class OclConfig {
 
 	// --- Sensors / Vision ---
 	public int fov = 110;
-	public int visionWidth = 16;
-	public int visionHeight = 16;
+	/** Raycasts per degree. Frame width = height = {@code fov * density}. */
+	public double density = 10.0;
+
+	/** Derived vision frame size in raycasts (square): {@code round(fov * density)}. */
+	public int visionResolution() {
+		return (int) Math.round(fov * density);
+	}
 
 	/** Shared singleton so the Mod Menu factory and any future runtime reader see the same state. */
 	public static OclConfig get() {

@@ -5,8 +5,8 @@ import dev.isxander.yacl3.api.Option;
 import dev.isxander.yacl3.api.OptionDescription;
 import dev.isxander.yacl3.api.OptionGroup;
 import dev.isxander.yacl3.api.YetAnotherConfigLib;
+import dev.isxander.yacl3.api.controller.DoubleSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.EnumControllerBuilder;
-import dev.isxander.yacl3.api.controller.IntegerFieldControllerBuilder;
 import dev.isxander.yacl3.api.controller.IntegerSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.StringControllerBuilder;
 import mod.kelvinlby.config.OclConfig.Transport;
@@ -73,19 +73,15 @@ public final class OclConfigScreen {
 												.range(0, 180)
 												.step(1))
 										.build())
-								.option(Option.<Integer>createBuilder()
-										.name(Text.literal("Width"))
+								.option(Option.<Double>createBuilder()
+										.name(Text.literal("Density"))
 										.description(OptionDescription.of(Text.literal(
-												"Width, in number of raycasts, of each vision frame.")))
-										.binding(defaults.visionWidth, () -> cfg.visionWidth, v -> cfg.visionWidth = v)
-										.controller(opt -> IntegerFieldControllerBuilder.create(opt).min(1))
-										.build())
-								.option(Option.<Integer>createBuilder()
-										.name(Text.literal("Height"))
-										.description(OptionDescription.of(Text.literal(
-												"Height, in number of raycasts, of each vision frame.")))
-										.binding(defaults.visionHeight, () -> cfg.visionHeight, v -> cfg.visionHeight = v)
-										.controller(opt -> IntegerFieldControllerBuilder.create(opt).min(1))
+												"Number of raycasts per degree. Each vision frame is square, with "
+														+ "width = height = FOV × density.")))
+										.binding(defaults.density, () -> cfg.density, v -> cfg.density = v)
+										.controller(opt -> DoubleSliderControllerBuilder.create(opt)
+												.range(0.1, 40.0)
+												.step(0.1))
 										.build())
 								.build())
 						.build())
