@@ -26,5 +26,6 @@ jobs:
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Artifacts
+          name: ${{ github.event.repository.name }}
           path: build/libs/
+          retention-days: 7
