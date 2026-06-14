@@ -1,0 +1,40 @@
+{
+	"schemaVersion": 1,
+	"id": "open-crafter-link",
+	"version": "${version}",
+	"name": "Open Crafter Link",
+	"description": "Bridges the Minecraft player to the Open Crafter embodied inference engine over ZMQ (PUB/SUB, conflated).",
+	"authors": [
+		"Kelvin_LBY"
+	],
+	"contact": {
+		"homepage": "https://github.com/Kelvinlby/minecraft-link"
+	},
+	"license": "GPL-3.0",
+	"icon": "assets/open-crafter-link/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"main": [
+			"mod.kelvinlby.OpenCrafterLink"
+		],
+		"client": [
+			"mod.kelvinlby.OpenCrafterLinkClient"
+		],
+		"modmenu": [
+			"mod.kelvinlby.config.ModMenuIntegration"
+		]
+	},
+	"mixins": [
+		"open-crafter-link.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.0",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*",
+		"yet_another_config_lib_v3": "*"
+	},
+	"suggests": {
+		"modmenu": "*"
+	}
+}
