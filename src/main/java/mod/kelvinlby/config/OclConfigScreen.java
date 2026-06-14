@@ -70,7 +70,7 @@ public final class OclConfigScreen {
 												"Field of view, in degrees, of the vision frames sent to the controller.")))
 										.binding(defaults.fov, () -> cfg.fov, v -> cfg.fov = v)
 										.controller(opt -> IntegerSliderControllerBuilder.create(opt)
-												.range(0, 360)
+												.range(0, 180)
 												.step(1))
 										.build())
 								.option(Option.<Integer>createBuilder()
