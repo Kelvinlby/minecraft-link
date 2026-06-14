@@ -1,24 +1,17 @@
 package mod.kelvinlby;
 
-import net.fabricmc.api.ModInitializer;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class OpenCrafterLink implements ModInitializer {
+/**
+ * Shared constants for the (client-only) mod. The actual initialization lives in
+ * {@link OpenCrafterLinkClient}; this class only holds the mod id and logger.
+ */
+public final class OpenCrafterLink {
 	public static final String MOD_ID = "open-crafter-link";
 
-	// This logger is used to write text to the console and the log file.
-	// It is considered best practice to use your mod id as the logger's name.
-	// That way, it's clear which mod wrote info, warnings, and errors.
 	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-	@Override
-	public void onInitialize() {
-		// This code runs as soon as Minecraft is in a mod-load-ready state.
-		// However, some things (like resources) may still be uninitialized.
-		// Proceed with mild caution.
-
-		LOGGER.info("Hello Fabric world!");
+	private OpenCrafterLink() {
 	}
 }

@@ -14,9 +14,6 @@
 	"icon": "assets/open-crafter-link/icon.png",
 	"environment": "client",
 	"entrypoints": {
-		"main": [
-			"mod.kelvinlby.OpenCrafterLink"
-		],
 		"client": [
 			"mod.kelvinlby.OpenCrafterLinkClient"
 		],
