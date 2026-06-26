@@ -3,11 +3,8 @@ package mod.kelvinlby.config;
 import dev.isxander.yacl3.api.ConfigCategory;
 import dev.isxander.yacl3.api.Option;
 import dev.isxander.yacl3.api.OptionDescription;
-import dev.isxander.yacl3.api.OptionGroup;
 import dev.isxander.yacl3.api.YetAnotherConfigLib;
-import dev.isxander.yacl3.api.controller.DoubleSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.EnumControllerBuilder;
-import dev.isxander.yacl3.api.controller.IntegerSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.StringControllerBuilder;
 import mod.kelvinlby.config.OclConfig.Transport;
 import net.minecraft.client.gui.screen.Screen;
@@ -57,32 +54,6 @@ public final class OclConfigScreen {
 										"ZMQ endpoint URL (e.g. tcp://127.0.0.1). Used only when Type is TCP.")))
 								.binding(defaults.tcpUrl, () -> cfg.tcpUrl, v -> cfg.tcpUrl = v)
 								.controller(StringControllerBuilder::create)
-								.build())
-						.build())
-				// ---- Tab: Sensors ----
-				.category(ConfigCategory.createBuilder()
-						.name(Text.literal("Sensors"))
-						.group(OptionGroup.createBuilder()
-								.name(Text.literal("Vision"))
-								.option(Option.<Integer>createBuilder()
-										.name(Text.literal("FOV"))
-										.description(OptionDescription.of(Text.literal(
-												"Field of view, in degrees, of the vision frames sent to the controller.")))
-										.binding(defaults.fov, () -> cfg.fov, v -> cfg.fov = v)
-										.controller(opt -> IntegerSliderControllerBuilder.create(opt)
-												.range(0, 180)
-												.step(1))
-										.build())
-								.option(Option.<Double>createBuilder()
-										.name(Text.literal("Density"))
-										.description(OptionDescription.of(Text.literal(
-												"Number of raycasts per degree. Each vision frame is square, with "
-														+ "width = height = FOV × density.")))
-										.binding(defaults.density, () -> cfg.density, v -> cfg.density = v)
-										.controller(opt -> DoubleSliderControllerBuilder.create(opt)
-												.range(0.1, 40.0)
-												.step(0.1))
-										.build())
 								.build())
 						.build())
 				.save(cfg::save)
