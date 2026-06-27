@@ -4,22 +4,19 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * Compact little-endian wire framing for the link's vectors. This stands in for ArrowIPC: the
- * payloads here are a handful of scalars plus one (currently dummy) vision vector, for which the full
- * Apache Arrow Java stack would be disproportionate overhead. Both methods are pure and run on the
- * bridge worker threads, never on the tick thread.
+ * Compact little-endian wire framing for the link's three message types. This stands in for ArrowIPC:
+ * the payloads are a handful of scalars ({@code OCLO}/{@code OCLI}) plus the RGBD vision frame
+ * ({@code OCLV}), for which the full Apache Arrow Java stack would be disproportionate overhead. All
+ * methods are pure and run on the bridge worker threads, never on the tick thread.
  *
  * <h2>Outbound — Minecraft -&gt; controller ("OCLO")</h2>
+ * Small per-tick control telemetry. Vision is <b>not</b> here — it has its own {@code OCLV} stream.
  * <pre>
  *   magic   : 4 bytes  "OCLO"
  *   version : u8       1
  *   yaw     : f32
  *   pitch   : f32
  *   slot    : i32                     (0..8)
- *   vis_w   : i32
- *   vis_h   : i32
- *   vision  : vis_w*vis_h*3 x f32     row-major, interleaved RGB, normalized 0..1
- *                                     (empty when vision disabled -&gt; vis_w = vis_h = 0)
  * </pre>
  *
  * <h2>Inbound — controller -&gt; Minecraft ("OCLI")</h2>
@@ -32,15 +29,34 @@ import java.nio.ByteOrder;
  *   yaw     : f32         NaN = no change
  *   pitch   : f32         NaN = no change
  * </pre>
+ *
+ * <h2>Vision — Minecraft -&gt; controller ("OCLV")</h2>
+ * A separate, frame-rate stream on its own PUB socket (see {@link LinkConfig.Endpoints#visPub()}), so the
+ * large RGBD payload conflates independently of the small {@code OCLO} control telemetry.
+ * <pre>
+ *   magic   : 4 bytes  "OCLV"
+ *   version : u8       1
+ *   vis_w   : i32                     downsampled frame width
+ *   vis_h   : i32                     downsampled frame height
+ *   near    : f32                     eye-space near plane (blocks)
+ *   far     : f32                     eye-space far plane (blocks)
+ *   rgb     : vis_w*vis_h*3 x f32     row-major, top-left origin, interleaved RGB, normalized 0..1
+ *   depth   : vis_w*vis_h   x f32     row-major, top-left origin, distance normalized 0..1
+ *                                     (= linear eye-space distance / far, clamped to [0,1])
+ * </pre>
  */
 public final class BinaryCodec {
 	private BinaryCodec() {}
 
 	static final byte VERSION = 1;
 
-	// "OCLO" / "OCLI" as big-endian-readable 4-byte tags (stored verbatim, order-independent).
+	// "OCLO" / "OCLI" / "OCLV" as big-endian-readable 4-byte tags (stored verbatim, order-independent).
 	private static final byte[] MAGIC_OUT = {'O', 'C', 'L', 'O'};
 	private static final byte[] MAGIC_IN = {'O', 'C', 'L', 'I'};
+	private static final byte[] MAGIC_VIS = {'O', 'C', 'L', 'V'};
+
+	/** Vision wire format version (independent of {@link #VERSION}). */
+	static final byte VIS_VERSION = 1;
 
 	// Movement bitmask layout.
 	private static final int M_FRONT = 1, M_BACK = 1 << 1, M_LEFT = 1 << 2, M_RIGHT = 1 << 3,
@@ -51,23 +67,9 @@ public final class BinaryCodec {
 	/** Header (magic + version) common to both directions. */
 	private static final int HEADER = 4 + 1;
 
-	/** Encode a telemetry snapshot. Vision pixels are written as-is, or synthesized as a dummy frame. */
+	/** Encode a telemetry snapshot as an {@code OCLO} message: header + yaw + pitch + slot. */
 	public static byte[] encodeOutbound(OutboundSnapshot s) {
-		int w = s.visionWidth();
-		int h = s.visionHeight();
-		int pixels = Math.max(0, w * h * 3);
-
-		float[] vision = s.visionRgb();
-		if (vision == null && pixels > 0) {
-			// Dummy frame: zeros. Real readback (see VisionCapture) fills this on the sender thread.
-			vision = new float[pixels];
-		}
-		int visionLen = (vision == null) ? 0 : vision.length;
-
-		int size = HEADER
-				+ 4 /* yaw */ + 4 /* pitch */ + 4 /* slot */
-				+ 4 /* vis_w */ + 4 /* vis_h */
-				+ 4 * visionLen;
+		int size = HEADER + 4 /* yaw */ + 4 /* pitch */ + 4 /* slot */;
 
 		ByteBuffer buf = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
 		buf.put(MAGIC_OUT);
@@ -75,10 +77,40 @@ public final class BinaryCodec {
 		buf.putFloat(s.yaw());
 		buf.putFloat(s.pitch());
 		buf.putInt(s.selectedSlot());
+		return buf.array();
+	}
+
+	/**
+	 * Encode a downsampled RGBD vision frame as an {@code OCLV} message. The RGB plane
+	 * ({@code w*h*3} floats) is written first, then the depth plane ({@code w*h} floats); both are
+	 * row-major, top-left origin, normalized 0..1. Pure; runs on the vision sender thread.
+	 */
+	public static byte[] encodeVision(VisionFrame f) {
+		int w = f.width();
+		int h = f.height();
+		int rgbLen = w * h * 3;
+		int depthLen = w * h;
+
+		int size = HEADER
+				+ 4 /* vis_w */ + 4 /* vis_h */
+				+ 4 /* near */ + 4 /* far */
+				+ 4 * rgbLen + 4 * depthLen;
+
+		ByteBuffer buf = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
+		buf.put(MAGIC_VIS);
+		buf.put(VIS_VERSION);
 		buf.putInt(w);
 		buf.putInt(h);
-		for (int i = 0; i < visionLen; i++) {
-			buf.putFloat(vision[i]);
+		buf.putFloat(f.near());
+		buf.putFloat(f.far());
+
+		float[] rgb = f.rgb();
+		for (int i = 0; i < rgbLen; i++) {
+			buf.putFloat(rgb[i]);
+		}
+		float[] depth = f.depth();
+		for (int i = 0; i < depthLen; i++) {
+			buf.putFloat(depth[i]);
 		}
 		return buf.array();
 	}

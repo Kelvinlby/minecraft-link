@@ -36,7 +36,7 @@ public final class TickDriver {
 		applyActions(mc, in);
 
 		// ---- OUTBOUND: gather and hand off a fresh snapshot ----
-		bridge.publish(buildSnapshot(mc, player));
+		bridge.publish(buildSnapshot(player));
 	}
 
 	/**
@@ -85,22 +85,12 @@ public final class TickDriver {
 		}
 	}
 
-	private OutboundSnapshot buildSnapshot(MinecraftClient mc, ClientPlayerEntity player) {
-		int visW = 0;
-		int visH = 0;
-		if (LinkConfig.VISION_ENABLED) {
-			int[] dim = VisionCapture.dimensions(mc);
-			visW = dim[0];
-			visH = dim[1];
-		}
-		// Pixels are left null here and synthesized (dummy) on the sender thread during encoding,
-		// keeping the tick thread free of any heavy vision work.
+	private OutboundSnapshot buildSnapshot(ClientPlayerEntity player) {
+		// Vision is captured on the render thread and published on its own OCLV stream (see
+		// VisionCapture), so it never rides this per-tick snapshot.
 		return new OutboundSnapshot(
 				player.getYaw(),
 				player.getPitch(),
-				player.getInventory().getSelectedSlot(),
-				visW,
-				visH,
-				null);
+				player.getInventory().getSelectedSlot());
 	}
 }

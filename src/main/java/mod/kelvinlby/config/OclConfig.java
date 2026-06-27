@@ -3,6 +3,7 @@ package mod.kelvinlby.config;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import mod.kelvinlby.OpenCrafterLink;
+import mod.kelvinlby.link.LinkConfig;
 import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
@@ -16,16 +17,14 @@ import java.nio.file.Path;
  * screen ({@link OclConfigScreen}) binds to. It is intentionally a plain mutable holder — the fields
  * are public so the screen's getter/setter lambdas stay trivial.
  *
- * <p>Note: these values are not yet consumed by the ZMQ bridge / vision pipeline; wiring them into the
- * runtime is a separate step.
+ * <p>The link transport is TCP. {@link #toEndpoints()} converts these settings into the three ZMQ
+ * endpoints the bridge binds/connects; the screen rebuilds them and restarts the bridge on save.
+ *
+ * <p>The camera resolution ({@link #cameraWidth}/{@link #cameraHeight}) drives the vision pipeline's
+ * downsample target (see {@code OpenCrafterLinkClient} and {@code VisionCapture}); the
+ * {@code ocl.visionWidth}/{@code ocl.visionHeight} launch properties override it when set.
  */
 public class OclConfig {
-
-	/** Transport the link uses to reach the controller. */
-	public enum Transport {
-		UNIX_DOMAIN_SOCKET,
-		TCP
-	}
 
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static final Path PATH =
@@ -34,9 +33,14 @@ public class OclConfig {
 	private static OclConfig instance;
 
 	// --- Link ---
-	public Transport transport = Transport.UNIX_DOMAIN_SOCKET;
-	public String socketPath = defaultSocketPath();
+	/** Base ZMQ TCP URL of the controller, host only (e.g. {@code tcp://127.0.0.1}); ports are canonical. */
 	public String tcpUrl = "tcp://127.0.0.1";
+
+	// --- Sensors / Camera ---
+	/** Height, in pixels, of the camera frames sent to the controller. */
+	public int cameraHeight = 144;
+	/** Width, in pixels, of the camera frames sent to the controller. */
+	public int cameraWidth = 256;
 
 	/** Shared singleton so the Mod Menu factory and any future runtime reader see the same state. */
 	public static OclConfig get() {
@@ -70,7 +74,38 @@ public class OclConfig {
 		}
 	}
 
-	private static String defaultSocketPath() {
-		return Path.of(System.getProperty("java.io.tmpdir"), "open-crafter-link.sock").toString();
+	/**
+	 * Resolve the three ZMQ endpoints from this config. The mod BINDs its two PUB sockets on all
+	 * interfaces ({@code tcp://*:port}) and SUB-connects to the controller's host on the instruction
+	 * port. A set {@code ocl.*Endpoint} launch property overrides the corresponding derived endpoint.
+	 */
+	public LinkConfig.Endpoints toEndpoints() {
+		String host = hostOf(tcpUrl);
+		String pub = firstNonNull(LinkConfig.PUB_ENDPOINT_OVERRIDE, "tcp://*:" + LinkConfig.TELEMETRY_PORT);
+		String sub = firstNonNull(LinkConfig.SUB_ENDPOINT_OVERRIDE, "tcp://" + host + ":" + LinkConfig.INSTRUCTION_PORT);
+		String visPub = firstNonNull(LinkConfig.VIS_PUB_ENDPOINT_OVERRIDE, "tcp://*:" + LinkConfig.VISION_PORT);
+		return new LinkConfig.Endpoints(pub, sub, visPub);
+	}
+
+	/** Extract the host from a {@code tcp://host[:port]} URL, falling back to localhost if unparseable. */
+	private static String hostOf(String tcpUrl) {
+		String s = tcpUrl == null ? "" : tcpUrl.trim();
+		int scheme = s.indexOf("://");
+		if (scheme >= 0) {
+			s = s.substring(scheme + 3);
+		}
+		int colon = s.indexOf(':'); // strip any user-supplied port; we use the canonical instruction port
+		if (colon >= 0) {
+			s = s.substring(0, colon);
+		}
+		int slash = s.indexOf('/');
+		if (slash >= 0) {
+			s = s.substring(0, slash);
+		}
+		return s.isEmpty() ? "127.0.0.1" : s;
+	}
+
+	private static String firstNonNull(String override, String derived) {
+		return override != null ? override : derived;
 	}
 }
