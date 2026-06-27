@@ -1,6 +1,8 @@
 package mod.kelvinlby.link;
 
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.opengl.GlConst;
+import com.mojang.blaze3d.opengl.GlStateManager;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -8,6 +10,8 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import mod.kelvinlby.OpenCrafterLink;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
+import net.minecraft.client.gl.GlGpuBuffer;
+import net.minecraft.client.texture.GlTexture;
 
 import java.nio.ByteBuffer;
 import java.util.function.IntSupplier;
@@ -50,6 +54,16 @@ public final class VisionCapture {
 	private int fbH = -1;
 	private Slot[] ring;
 	private volatile boolean disposed;
+
+	/**
+	 * A lazily-created GL framebuffer object used solely to read the depth attachment. MC's
+	 * {@link CommandEncoder#copyTextureToBuffer} always attaches the source texture as
+	 * {@code GL_COLOR_ATTACHMENT0}, which is invalid for a depth-format texture (the resulting read
+	 * framebuffer is incomplete and {@code glReadPixels} fails with {@code GL_INVALID_FRAMEBUFFER_OPERATION}),
+	 * so we bind the depth texture to our own FBO's {@code GL_DEPTH_ATTACHMENT} and read it ourselves.
+	 * {@code 0} means "not yet created". Render thread only.
+	 */
+	private int depthFbo;
 
 	/** One ring entry: a colour + depth read-back buffer pair plus its in-flight state. */
 	private static final class Slot {
@@ -125,9 +139,47 @@ public final class VisionCapture {
 		slot.depthReady = false;
 		slot.pending = true;
 
+		// Colour goes through MC's async GPU->CPU copy. Depth cannot (see copyDepthToBuffer): we issue
+		// our own asynchronous glReadPixels into the same kind of read-back PBO and fence it identically,
+		// so the render thread never blocks on either readback — no frame-rate cost.
 		CommandEncoder enc = RenderSystem.getDevice().createCommandEncoder();
 		enc.copyTextureToBuffer(colorTex, slot.color, 0L, () -> slot.colorReady = true, 0);
-		enc.copyTextureToBuffer(depthTex, slot.depth, 0L, () -> slot.depthReady = true, 0);
+		copyDepthToBuffer(depthTex, slot.depth, w, h, () -> slot.depthReady = true);
+	}
+
+	/**
+	 * Asynchronously read the depth attachment into {@code dst} (a {@code GL_PIXEL_PACK_BUFFER}-capable
+	 * read-back PBO), mirroring what MC's {@link CommandEncoder#copyTextureToBuffer} does for colour but
+	 * binding the source as {@code GL_DEPTH_ATTACHMENT} so the read framebuffer is complete. The pixels
+	 * land as {@code w*h} little-endian floats in [0,1] (window-space depth), bottom-row first — the same
+	 * layout {@link #downsampleDepth} consumes. Like the colour copy, the {@code glReadPixels} into a
+	 * bound PBO returns immediately (the driver DMAs in the background); {@code onReady} fires from the
+	 * render thread once the matching fence signals. Render thread only.
+	 */
+	private void copyDepthToBuffer(GpuTexture depthTex, GpuBuffer dst, int w, int h, Runnable onReady) {
+		if (depthFbo == 0) {
+			depthFbo = GlStateManager.glGenFramebuffers();
+		}
+		int depthGlId = ((GlTexture) depthTex).getGlId();
+		int pboId = ((GlGpuBuffer) dst).id;
+
+		GlStateManager.clearGlErrors();
+		GlStateManager._glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, depthFbo);
+		GlStateManager._glFramebufferTexture2D(
+				GlConst.GL_READ_FRAMEBUFFER, GlConst.GL_DEPTH_ATTACHMENT, GlConst.GL_TEXTURE_2D, depthGlId, 0);
+		GlStateManager._glBindBuffer(GlConst.GL_PIXEL_PACK_BUFFER, pboId);
+		GlStateManager._pixelStore(GlConst.GL_PACK_ROW_LENGTH, w);
+		GlStateManager._readPixels(0, 0, w, h, GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT, 0L);
+		RenderSystem.queueFencedTask(onReady);
+		// Detach + unbind so we never hold a reference to MC's depth texture across frames.
+		GlStateManager._glFramebufferTexture2D(
+				GlConst.GL_READ_FRAMEBUFFER, GlConst.GL_DEPTH_ATTACHMENT, GlConst.GL_TEXTURE_2D, 0, 0);
+		GlStateManager._glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, 0);
+		GlStateManager._glBindBuffer(GlConst.GL_PIXEL_PACK_BUFFER, 0);
+		int err = GlStateManager._getError();
+		if (err != 0) {
+			OpenCrafterLink.LOGGER.warn("[open-crafter-link] depth read-back glReadPixels failed: GL error {}", err);
+		}
 	}
 
 	/** Map + downsample every slot whose colour and depth copies have both completed. Render thread. */
@@ -297,5 +349,9 @@ public final class VisionCapture {
 			return;
 		}
 		closeRing();
+		if (depthFbo != 0) {
+			GlStateManager._glDeleteFramebuffers(depthFbo);
+			depthFbo = 0;
+		}
 	}
 }

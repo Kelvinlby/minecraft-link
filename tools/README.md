@@ -15,9 +15,10 @@ uv pip install --python .venv pillow        # only for `vision --dump-dir` PNG d
 uv pip install --python .venv numpy open3d  # only for the `pointcloud` 3D viewer
 ```
 
-Vision is always on. If you want, set a custom resolution/rate at launch:
+Run the client with vision enabled (and, if you want, custom resolution/rate):
 
 ```
+-Docl.vision=true
 # optional: -Docl.visionWidth=128 -Docl.visionHeight=128 -Docl.visionMaxHz=40
 ```
 
@@ -59,12 +60,13 @@ $PY ocl_test_controller.py roundtrip --yaw 123 --pitch -20
 # Dashboard: telemetry + vision rates side by side for 10s
 $PY ocl_test_controller.py all --seconds 10
 
-# 3D point cloud: back-project the RGBD stream into a live Open3D window
-$PY ocl_test_controller.py pointcloud                       # live, updates per frame
-$PY ocl_test_controller.py pointcloud --fov 90 --max-blocks 96
+# 3D RGBD "box": front face = the in-game image, perpendicular axis = depth
+$PY ocl_test_controller.py pointcloud                       # live, corner view
+$PY ocl_test_controller.py pointcloud --orbit-speed 1       # slowly spin to show depth
+$PY ocl_test_controller.py pointcloud --angle 35 --elevation 25 --depth-scale 1.5
 $PY ocl_test_controller.py pointcloud --save scene.ply      # one frame -> .ply, no GUI
-#   -> drag to orbit; red/green/blue axes = +X(right)/+Y(up)/+Z(toward viewer).
-#      The scene in front of the player sits at negative Z.
+#   -> a rectangular box seen from a corner: the front face shows the image exactly as
+#      in-game, and each pixel is pushed back along the depth axis by its depth value.
 ```
 
 ## What each command proves
@@ -77,22 +79,25 @@ $PY ocl_test_controller.py pointcloud --save scene.ply      # one frame -> .ply,
 - **roundtrip** — control + telemetry close the loop: a commanded yaw/pitch shows up
   in the telemetry within tolerance.
 - **all** — telemetry and vision flow concurrently at independent cadences.
-- **pointcloud** — the RGBD frame back-projects into a geometrically sensible 3D scene:
-  each pixel's depth becomes a real distance (in blocks) and the colored points line up
-  with the world you're looking at. Confirms RGB and depth are spatially registered.
+- **pointcloud** — the RGBD frame renders as an extruded image-plane box whose front face
+  matches the in-game view and whose depth axis lifts each pixel by its depth. Confirms RGB
+  and depth are spatially registered, and lets you read the scene's depth structure at a glance.
 
 ## Point-cloud geometry
 
-`pointcloud` reconstructs camera-space XYZ with a pinhole model: `Z = depth_norm · far`
-(the wire depth is already linear eye-space distance ÷ far), then
-`X = (u − cx)·Z/f` and `Y = (v − cy)·Z/f`, with focal length `f` derived from `--fov`
-(vertical, default 70° — Minecraft's default). Sky / far-plane pixels (`depth ≈ 1`) and
-anything past `--max-blocks` are dropped so the back wall doesn't smear.
+`pointcloud` builds an **extruded image-plane box** — it keeps each pixel on a flat front face
+(the image as seen in-game) and pushes it backward by its depth:
 
-> The focal length is taken from the **vertical** FOV and the frame's own height. If the
-> captured frame's aspect ratio doesn't match the game window (see the vision aspect-ratio
-> note in the main README), horizontal scale will be slightly off — set the camera
-> resolution to your window's aspect for a correctly-proportioned cloud.
+- `X = (col / (w−1) − 0.5) · aspect`  → width, face spans ±aspect/2  (`aspect = w/h`)
+- `Y = 0.5 − row / (h−1)`             → height, face spans ±0.5, +Y up (top row at top)
+- `Z = −depth_norm · depth_scale`     → 0 at the near plane, −depth_scale at the far plane
+
+So the front face (depth 0) is exactly the photo and the perpendicular axis is depth. **Every**
+pixel is kept — including the far-plane sky, which forms the box's colored back wall.
+
+The camera views the box from a corner: `--angle` (azimuth) and `--elevation` set the viewpoint,
+`--orbit-speed` slowly spins it, and `--depth-scale` sets the depth-axis length (0 = auto-fit to a
+roughly cubic box). The view is orthographic and refit to the box each frame, so it stays framed.
 
 ## Depth units
 

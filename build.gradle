@@ -6,6 +6,11 @@ plugins {
 version = project.mod_version
 group = project.maven_group
 
+loom {
+	// VisionCapture reaches GlGpuBuffer.id to bind the depth read-back PBO for its own glReadPixels.
+	accessWidenerPath = file("src/main/resources/open-crafter-link.accesswidener")
+}
+
 repositories {
 	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
 	// JeroMQ lives on Maven Central, which Loom does not add by default.

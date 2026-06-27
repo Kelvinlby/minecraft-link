@@ -42,6 +42,9 @@ public final class LinkConfig {
 	/** Receive timeout for the SUB poll loop (ms). Keeps {@code stop()} responsive. */
 	public static final int RECV_POLL_MS = 5;
 
+	/** When false, no vision is captured or published (the {@code OCLV} stream stays silent). */
+	public static final boolean VISION_ENABLED = Boolean.getBoolean("ocl.vision");
+
 	/**
 	 * Optional launch-time override of the published RGBD frame's target (downsampled) resolution. When
 	 * either property is set it wins over the in-game settings screen ({@code OclConfig.cameraWidth/Height});

@@ -4,7 +4,7 @@ Open Crafter Link — test controller.
 
 Stands in for the external "Open Crafter" controller to exercise every link
 functionality end-to-end against a running Minecraft client with the mod loaded
-(the RGBD stream is always enabled).
+(launched with -Docl.vision=true to enable the RGBD stream).
 
 Wire roles (from LinkConfig / BinaryCodec):
 
@@ -23,8 +23,8 @@ Subcommands:
     roundtrip   send a rotation instruction, then read telemetry back and assert the
                 player's yaw/pitch actually changed (closes the control loop)
     all         run telemetry + vision readers together (dashboard) for a fixed time
-    pointcloud  back-project the RGBD stream into a live 3D point cloud (Open3D), or
-                save a single frame to a .ply with --save
+    pointcloud  render the RGBD stream as a live 3D "box" (Open3D): the front face is the
+                image as seen in-game, the perpendicular axis is depth; or save a .ply with --save
 
 Examples:
     python ocl_test_controller.py telemetry
@@ -225,7 +225,7 @@ def cmd_vision(args):
     try:
         while deadline is None or time.monotonic() < deadline:
             if not poller.poll(1000):
-                print("\n[vision] no frame in 1s — is the client in a world?")
+                print("\n[vision] no frame in 1s — launched with -Docl.vision=true and in a world?")
                 continue
             t_recv = time.monotonic()
             f = decode_vision(sock.recv())
@@ -270,123 +270,244 @@ def _dump_frame(f: VisionFrame, out_dir: str, idx: int, t_recv: float):
 # --------------------------------------------------------------------------- #
 # RGBD -> 3D point cloud                                                       #
 # --------------------------------------------------------------------------- #
-def _backproject(f: VisionFrame, fov_deg: float, max_blocks: float):
+def _extrude(f: VisionFrame, depth_scale: float):
     """
-    Back-project an OCLV frame into a colored point cloud in camera space.
+    Build an "extruded image-plane box" from an OCLV frame: every pixel keeps its position on a
+    flat front face (the RGB image as seen in-game) and is pushed *backward* by its depth.
 
-    The mod ships depth as ``norm = linear_eye_distance / far`` (see VisionCapture.convert),
-    so the forward distance of each pixel is simply ``Z = norm * far`` blocks. With a pinhole
-    model whose focal length comes from the vertical FOV, the lateral coordinates are
-    ``X = (u - cx) * Z / f`` and ``Y = (v - cy) * Z / f``.
+    Geometry (right-handed, +X right, +Y up, depth recedes to -Z):
+      X = (col / (w-1) - 0.5) * aspect   -> face spans [-aspect/2, +aspect/2], aspect = w/h
+      Y =  0.5 - row / (h-1)             -> face spans [-0.5, +0.5], +Y up (row 0 at top)
+      Z = -t * scale                     -> 0 at the nearest real pixel, -scale at the farthest
 
-    Axes (right-handed, OpenGL/Open3D convention): +X right, +Y up, +Z toward the viewer, so
-    the scene in front of the player sits at negative Z. Pixels at or beyond ``max_blocks``
-    (and the depth==1 "sky" clamp) are dropped so the far plane doesn't smear into a wall.
+    The depth axis is **auto-fit to the real geometry**: the wire depth normalizes distance by the
+    far plane (~1024 blocks), so a close scene would squash all terrain into the front few percent
+    while only sky reaches the back. Instead we map the actual min..max distance of the non-sky
+    pixels onto the full box (``t`` = (dist - near) / (far_real - near)), so terrain fills the depth
+    axis. Sky / far-plane pixels (depth ~= 1) are kept but clamped to the back wall.
 
-    Returns ``(xyz, rgb)`` as numpy float arrays of shape (N, 3), or (empty, empty).
+    ``depth_scale`` sets the box's depth dimension. If <= 0 it auto-fits to ``aspect`` so the depth
+    axis is about as long as the face width (a roughly cubic box).
+
+    Returns ``(xyz, rgb)`` as numpy float arrays of shape (N, 3) = (w*h, 3).
     """
     import numpy as np
 
-    w, h, far = f.w, f.h, f.far
-    depth = np.asarray(f.depth, dtype=np.float32).reshape(h, w)
+    w, h = f.w, f.h
+    aspect = w / h
+    scale = depth_scale if depth_scale > 0.0 else aspect
+
+    depth = np.asarray(f.depth, dtype=np.float32).reshape(h, w)   # normalized 0..1 (dist / far)
     rgb = np.asarray(f.rgb, dtype=np.float32).reshape(h, w, 3)
 
-    z_blocks = depth * far  # forward distance per pixel
-    # Focal length in pixels from the vertical FOV; cx/cy at the image center.
-    f_px = (h / 2.0) / math.tan(math.radians(fov_deg) / 2.0)
-    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    cols = np.arange(w, dtype=np.float32)[None, :]
+    rows = np.arange(h, dtype=np.float32)[:, None]
+    x = np.broadcast_to(((cols / max(w - 1, 1)) - 0.5) * aspect, (h, w))
+    y = np.broadcast_to(0.5 - rows / max(h - 1, 1), (h, w))
 
-    us = np.arange(w, dtype=np.float32)[None, :].repeat(h, axis=0)
-    vs = np.arange(h, dtype=np.float32)[:, None].repeat(w, axis=1)
+    # Auto-fit the depth axis to the real (non-sky) geometry's distance range.
+    sky = depth >= 0.999
+    real = depth[~sky]
+    if real.size:
+        d_lo = float(real.min())
+        d_hi = float(real.max())
+    else:
+        d_lo, d_hi = 0.0, 1.0
+    span = (d_hi - d_lo) or 1e-6
+    t = np.clip((depth - d_lo) / span, 0.0, 1.0)   # 0 at nearest real px, 1 at farthest
+    t[sky] = 1.0                                    # sky pinned to the back wall
+    z = -t * scale
 
-    x = (us - cx) * z_blocks / f_px
-    y = -(vs - cy) * z_blocks / f_px   # image v grows downward; flip to make +Y up
-    z = -z_blocks                      # scene in front of the player -> negative Z
-
-    # Drop the sky / far-plane clamp and anything past the cutoff.
-    keep = (depth < 0.999) & (z_blocks <= max_blocks) & (z_blocks > 0.0)
-    xyz = np.stack((x[keep], y[keep], z[keep]), axis=1)
-    col = rgb[keep]
+    xyz = np.stack((x.ravel(), y.ravel(), z.ravel()), axis=1)
+    col = rgb.reshape(-1, 3)
     return xyz, col
 
 
 def cmd_pointcloud(args):
     """Live (or one-shot) 3D point-cloud view of the OCLV RGBD stream."""
     try:
-        import numpy as np  # noqa: F401  (used by _backproject)
+        import numpy as np  # noqa: F401  (used by _extrude)
     except ImportError:
         return _missing("numpy", "uv pip install numpy")
-
-    # --save writes a single .ply and needs no GUI/Open3D display — handy over SSH.
-    save_only = bool(args.save)
-
-    o3d = None
-    if not save_only:
-        try:
-            import open3d as o3d  # noqa: F811
-        except ImportError:
-            print("[pointcloud] open3d not installed; falling back to one-shot --save")
-            print("             for a live window:  uv pip install open3d")
-            if not args.save:
-                args.save = "ocl_pointcloud.ply"
-            save_only = True
 
     ctx = zmq.Context.instance()
     sock = sub_socket(ctx, args.vision)
     poller = zmq.Poller()
     poller.register(sock, zmq.POLLIN)
-    print(f"[pointcloud] subscribed to {args.vision}  fov={args.fov}°  max={args.max_blocks}b")
+    print(f"[pointcloud] subscribed to {args.vision}")
 
-    # ---- one-shot save path (no live window) ----
-    if save_only:
+    # ---- one-shot save path (no GUI, no GPU) ----
+    if args.save:
         if not poller.poll(3000):
-            print("[pointcloud] no frame in 3s — is the client in a world?")
+            print("[pointcloud] no frame in 3s — is the mod running and in a world?")
             return 1
         f = decode_vision(sock.recv())
-        xyz, col = _backproject(f, args.fov, args.max_blocks)
+        xyz, col = _extrude(f, args.depth_scale)
         _save_ply(args.save, xyz, col)
         print(f"[pointcloud] saved {len(xyz)} points from a {f.w}x{f.h} frame to {args.save}")
         return 0
 
-    # ---- live window path ----
-    pcd = o3d.geometry.PointCloud()
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name="Open Crafter Link — RGBD", width=960, height=720)
-    # A small frame at the camera origin orients the viewer (red=+X, green=+Y, blue=+Z).
-    vis.add_geometry(o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0))
+    # ---- live view ----
+    # Open3D's interactive windows (GLFW classic and Filament windowed) don't initialize on
+    # every Linux/Wayland session, but its Filament *offscreen* EGL renderer is reliable. So we
+    # render the cloud offscreen and display the frames in a Matplotlib window, viewed from a
+    # corner so it reads as 3D. If no GUI backend is available either, we fall back to --save.
+    return _live_pointcloud(sock, poller, args)
 
-    first = True
+
+def _live_pointcloud(sock, poller, args):
+    import numpy as np
+    try:
+        import open3d as o3d
+        import open3d.visualization.rendering as rendering
+    except ImportError:
+        print("[pointcloud] open3d not installed; falling back to a one-shot .ply")
+        print("             for the live view:  uv pip install open3d matplotlib pyqt5")
+        return _fallback_save(sock, poller, args)
+
+    plt = _interactive_pyplot()
+    if plt is None:
+        print("[pointcloud] no usable GUI backend; falling back to a one-shot .ply")
+        print("             on Wayland try:  QT_QPA_PLATFORM=wayland  (with pyqt5 installed)")
+        return _fallback_save(sock, poller, args)
+
+    W, H = 960, 720
+    renderer = rendering.OffscreenRenderer(W, H)
+    renderer.scene.set_background([0.05, 0.05, 0.08, 1.0])
+    renderer.scene.scene.set_sun_light([0.5, -1, -0.5], [1, 1, 1], 60000)
+    mat = rendering.MaterialRecord()
+    mat.shader = "defaultUnlit"
+    mat.point_size = float(args.point_size)
+
+    pcd = o3d.geometry.PointCloud()
+    axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
+    renderer.scene.add_geometry("axes", axes, rendering.MaterialRecord())
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.canvas.manager.set_window_title("Open Crafter Link — RGBD point cloud")
+    ax.axis("off")
+    im = ax.imshow(np.zeros((H, W, 3), dtype=np.uint8))
+    fig.tight_layout()
+    plt.show(block=False)
+
+    have_geom = False
+    angle = 0.0
     count, start, last_print = 0, time.monotonic(), 0.0
     deadline = start + args.seconds if args.seconds else None
-    print("[pointcloud] live window open — close it or Ctrl-C to stop")
+    print("[pointcloud] live view open — close the window or Ctrl-C to stop")
     try:
         while deadline is None or time.monotonic() < deadline:
+            if not plt.fignum_exists(fig.number):
+                break  # user closed the window
             if poller.poll(0):
                 f = decode_vision(sock.recv())
-                xyz, col = _backproject(f, args.fov, args.max_blocks)
-                pcd.points = o3d.utility.Vector3dVector(xyz)
-                pcd.colors = o3d.utility.Vector3dVector(col)
-                if first and len(xyz):
-                    vis.add_geometry(pcd)          # add once it has geometry, then reset view
-                    vis.reset_view_point(True)
-                    first = False
-                else:
-                    vis.update_geometry(pcd)
+                xyz, col = _extrude(f, args.depth_scale)
+                if len(xyz):
+                    pcd.points = o3d.utility.Vector3dVector(xyz)
+                    pcd.colors = o3d.utility.Vector3dVector(col)
+                    if renderer.scene.has_geometry("cloud"):
+                        renderer.scene.remove_geometry("cloud")
+                    renderer.scene.add_geometry("cloud", pcd, mat)
+                    have_geom = True
                 count += 1
-                now = time.monotonic()
-                if now - last_print >= 0.5:
-                    rate = count / (now - start)
-                    print(f"\r[pointcloud] {f.w}x{f.h}  {len(xyz):6d} pts  ~{rate:4.1f} Hz",
-                          end="", flush=True)
-                    last_print = now
-            # Pump the GUI; returns False when the user closes the window.
-            if not vis.poll_events():
-                break
-            vis.update_renderer()
+
+            if have_geom:
+                # Isometric-style view: yaw (--angle) + elevation (--elevation) so all three axes
+                # — X (width), Y (height), Z (depth) — are distinct. --orbit-speed slowly spins the
+                # yaw so the 3D structure separates as it turns.
+                if args.orbit_speed:
+                    yaw = args.angle + (time.monotonic() - start) * args.orbit_speed * 6.0
+                else:
+                    yaw = args.angle
+                _aim_iso(renderer, pcd, math.radians(yaw), math.radians(args.elevation), W / H)
+                img = np.asarray(renderer.render_to_image())
+                im.set_data(img)
+                fig.canvas.draw_idle()
+            plt.pause(1.0 / 30.0)
+
+            now = time.monotonic()
+            if now - last_print >= 0.5:
+                rate = count / (now - start)
+                pts = len(pcd.points)
+                print(f"\r[pointcloud] {pts:6d} pts  {rate:4.1f} frames/s in", end="", flush=True)
+                last_print = now
     except KeyboardInterrupt:
         pass
-    vis.destroy_window()
-    print(f"\n[pointcloud] rendered {count} frames in {time.monotonic()-start:.1f}s")
+    print(f"\n[pointcloud] showed {count} frames in {time.monotonic()-start:.1f}s")
+    return 0
+
+
+def _aim_iso(renderer, pcd, yaw_rad, elev_rad, aspect):
+    """
+    Frame the cloud from an **isometric-style orthographic** viewpoint so all three axes read
+    distinctly: +X = width, +Y = height, +Z = depth. The eye is placed at azimuth ``yaw_rad`` around
+    the cloud and lifted by ``elev_rad`` above the horizon, then looks at the center. Orthographic
+    projection (no perspective) keeps near and far points at the same scale and fits the cloud to the
+    viewport via its bounding sphere, so it never shrinks into a corner as it spins.
+    """
+    import numpy as np
+    import open3d.visualization.rendering as rendering
+    pts = np.asarray(pcd.points)
+    if len(pts) == 0:
+        return
+    center = pts.mean(axis=0)
+
+    # View basis: forward = from eye toward center; right & up span the screen plane.
+    ce = math.cos(elev_rad)
+    fwd = np.array([ce * math.sin(yaw_rad), math.sin(elev_rad), ce * math.cos(yaw_rad)])
+    fwd = fwd / (np.linalg.norm(fwd) or 1.0)
+    up_world = np.array([0.0, 1.0, 0.0])
+    right = np.cross(up_world, fwd); right /= (np.linalg.norm(right) or 1.0)
+    up = np.cross(fwd, right)
+
+    # Fit the ortho box to the cloud's *projected* screen extent, so it fills the viewport
+    # tightly at this orientation instead of using the loose 3D bounding sphere.
+    rel = pts - center
+    su = rel @ right
+    sv = rel @ up
+    half_u = (float(su.max() - su.min()) * 0.5) or 1.0
+    half_v = (float(sv.max() - sv.min()) * 0.5) or 1.0
+    half = max(half_u / max(aspect, 1e-3), half_v) * 1.08
+
+    depth_span = float(np.ptp(rel @ fwd)) + half * 4.0
+    cam = renderer.scene.camera
+    cam.set_projection(rendering.Camera.Projection.Ortho,
+                       -half * aspect, half * aspect, -half, half,
+                       0.01, depth_span * 2.0)
+    eye = center + fwd * depth_span
+    cam.look_at(center, eye, up_world)
+
+
+def _interactive_pyplot():
+    """Return a pyplot bound to a working interactive backend, or None. Prefers Wayland on GNOME."""
+    import os
+    import matplotlib
+    # On a GNOME/Wayland session the Qt xcb plugin usually fails; the native wayland plugin works.
+    if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ["QT_QPA_PLATFORM"] = "wayland"
+    # Silence the harmless, repeated "Wayland does not support QWindow::requestActivate()" notice.
+    os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.wayland=false")
+    for backend in ("QtAgg", "TkAgg", "GTK4Agg"):
+        try:
+            matplotlib.use(backend, force=True)
+            import matplotlib.pyplot as plt
+            fig = plt.figure()
+            plt.close(fig)
+            return plt
+        except Exception:
+            continue
+    return None
+
+
+def _fallback_save(sock, poller, args):
+    path = args.save or "ocl_pointcloud.ply"
+    if not poller.poll(3000):
+        print("[pointcloud] no frame in 3s — is the mod running and in a world?")
+        return 1
+    f = decode_vision(sock.recv())
+    xyz, col = _extrude(f, args.depth_scale)
+    _save_ply(path, xyz, col)
+    print(f"[pointcloud] saved {len(xyz)} points from a {f.w}x{f.h} frame to {path}")
     return 0
 
 
@@ -551,7 +672,7 @@ def cmd_all(args):
           f"vision: {n_vis} frames ({n_vis/args.seconds:.1f} Hz)")
     ok = n_tel > 0
     if n_vis == 0:
-        print("[all] NOTE: no vision frames — is the client in a world?")
+        print("[all] NOTE: no vision frames — launch the client with -Docl.vision=true")
     return 0 if ok else 1
 
 
@@ -607,12 +728,20 @@ def build_parser():
     a.add_argument("--seconds", type=float, default=10.0)
     a.set_defaults(func=cmd_all)
 
-    pc = sub.add_parser("pointcloud", help="live 3D point-cloud view of the RGBD stream")
+    pc = sub.add_parser("pointcloud", help="live 3D RGBD box view (front face = the image, depth = perpendicular)")
     pc.add_argument("--seconds", type=float, default=0, help="stop after N seconds (0 = until closed)")
-    pc.add_argument("--fov", type=float, default=70.0,
-                    help="vertical field of view in degrees (Minecraft's default is 70)")
-    pc.add_argument("--max-blocks", type=float, default=64.0, dest="max_blocks",
-                    help="drop points farther than this (blocks) so the far plane doesn't smear")
+    pc.add_argument("--angle", type=float, default=35.0,
+                    help="camera azimuth (yaw) in degrees around the box; 0 = head-on (front face only), "
+                         "~35 gives a 3/4 corner view where the image face and the depth axis are both visible")
+    pc.add_argument("--elevation", type=float, default=25.0,
+                    help="camera elevation in degrees above the horizon (tilt to see the depth axis)")
+    pc.add_argument("--depth-scale", type=float, default=0.0, dest="depth_scale",
+                    help="length of the depth axis: 0 = auto-fit to a roughly cubic box; "
+                         "a positive value sets it manually (larger = deeper box)")
+    pc.add_argument("--orbit-speed", type=float, default=0.0, dest="orbit_speed",
+                    help="if >0, slowly spin the azimuth (deg/sec ×6) so the depth structure separates")
+    pc.add_argument("--point-size", type=float, default=4.0, dest="point_size",
+                    help="rendered point size in the live view")
     pc.add_argument("--save", metavar="PLY",
                     help="write one frame to a colored .ply and exit (no GUI needed)")
     pc.set_defaults(func=cmd_pointcloud)

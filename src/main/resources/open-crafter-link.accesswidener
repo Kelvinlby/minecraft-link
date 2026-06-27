@@ -1,0 +1,14 @@
+accessWidener v2 named
+
+# VisionCapture reads the depth attachment itself (MC's CommandEncoder.copyTextureToBuffer can
+# only read colour textures — it attaches the source as GL_COLOR_ATTACHMENT0, so a depth texture
+# yields an incomplete read-FBO and crashes with GL_INVALID_FRAMEBUFFER_OPERATION). To bind the
+# read-back PBO as GL_PIXEL_PACK_BUFFER for our own glReadPixels(GL_DEPTH_COMPONENT), we need its
+# raw GL name.
+accessible field net/minecraft/client/gl/GlGpuBuffer id I
+
+# AI control simulates keypresses by writing KeyBinding held state directly. The public setter
+# KeyBinding.setPressed is overridden by StickyKeyBinding (sneak/sprint/attack/use) to TOGGLE when the
+# user's toggle option is on, which would flip a held key on/off every tick. Writing the raw `pressed`
+# field bypasses that toggle path so a driven key behaves as a true hold regardless of toggle settings.
+accessible field net/minecraft/client/option/KeyBinding pressed Z

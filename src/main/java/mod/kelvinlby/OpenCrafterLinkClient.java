@@ -1,6 +1,7 @@
 package mod.kelvinlby;
 
 import mod.kelvinlby.config.OclConfig;
+import mod.kelvinlby.link.InputDriver;
 import mod.kelvinlby.link.LinkConfig;
 import mod.kelvinlby.link.TickDriver;
 import mod.kelvinlby.link.VisionCapture;
@@ -35,6 +36,12 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		OclConfig cfg = OclConfig.get();
 		bridge = new ZmqBridge();
 		bridge.start(cfg.toEndpoints());
+
+		// Inbound control is stamped onto the real KeyBindings at the HEAD of the client tick (before
+		// input events and entity ticking) so it takes effect this same tick; telemetry is published at
+		// END so it reflects post-physics state.
+		InputDriver inputDriver = new InputDriver(bridge);
+		ClientTickEvents.START_CLIENT_TICK.register(inputDriver::onStartClientTick);
 
 		TickDriver driver = new TickDriver(bridge);
 		ClientTickEvents.END_CLIENT_TICK.register(driver::onEndClientTick);

@@ -65,6 +65,7 @@ Set via JVM args (`-Docl.<name>=<value>`); when present, these win over the in-g
 
 | Property | Default | Notes |
 |----------|---------|-------|
+| `ocl.vision` | `false` | Master switch — vision is captured/published only when `true` |
 | `ocl.visionWidth` / `ocl.visionHeight` | from settings | Pin the downsample resolution |
 | `ocl.visionMaxHz` | `40` | Cap on capture rate |
 | `ocl.visionBoxFilter` | `false` | Box-average RGB on downsample instead of nearest-neighbour |
