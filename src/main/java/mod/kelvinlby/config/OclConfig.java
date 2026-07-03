@@ -17,8 +17,9 @@ import java.nio.file.Path;
  * screen ({@link OclConfigScreen}) binds to. It is intentionally a plain mutable holder — the fields
  * are public so the screen's getter/setter lambdas stay trivial.
  *
- * <p>The link transport is {@link #transport}: {@link Transport#TCP} (ZMQ over TCP, the default) or
- * {@link Transport#UDS} (plain {@code AF_UNIX} domain sockets, faster local-only). {@link #toEndpoints()}
+ * <p>The link transport is {@link #transport}: {@link Transport#UDS} (plain {@code AF_UNIX} domain sockets,
+ * faster local-only — the default) or {@link Transport#TCP} (ZMQ over TCP, for a networked controller).
+ * {@link #toEndpoints()}
  * converts these settings into the three ZMQ TCP endpoints; {@link #toUdsEndpoints()} into the three UDS
  * socket paths. The screen rebuilds whichever the chosen transport needs and restarts the bridge on save.
  *
@@ -36,15 +37,16 @@ public class OclConfig {
 
 	/** Link transport. Gson serializes enums by name, so no extra persistence wiring is needed. */
 	public enum Transport {
-		/** ZeroMQ over TCP loopback — the default; works across a network and with unmodified pyzmq. */
+		/** ZeroMQ over TCP loopback — works across a network; requires JeroMQ (mod) and pyzmq (controller). */
 		TCP,
-		/** Plain {@code AF_UNIX} domain sockets (length-prefixed framing) — faster, same-machine only. */
+		/** Plain {@code AF_UNIX} domain sockets (length-prefixed framing) — the default; faster, same-machine only. */
 		UDS
 	}
 
 	// --- Link ---
-	/** Which transport the link uses. Defaults to {@link Transport#TCP} for backwards compatibility. */
-	public Transport transport = Transport.TCP;
+	/** Which transport the link uses. Defaults to {@link Transport#UDS} (faster, local-only); switch to
+	 * {@link Transport#TCP} for a networked controller. */
+	public Transport transport = Transport.UDS;
 
 	/** Base ZMQ TCP URL of the controller, host only (e.g. {@code tcp://127.0.0.1}); ports are canonical. Used only in TCP mode. */
 	public String tcpUrl = "tcp://127.0.0.1";

@@ -8,9 +8,10 @@ state and a real RGBD view of the world *out*, and applies movement / look / act
 instructions *in* — turning a vanilla client into a controllable embodied environment.
 
 - **Minecraft:** 1.21.11 · **Loader:** Fabric · **Side:** client only
-- **Transport:** ZMQ over TCP (PUB/SUB, all sockets conflated — newest message wins), or
-  Unix domain sockets (`AF_UNIX`, length-prefixed framing) for a faster local-only link —
-  selectable in the settings screen (**Link → Transport**)
+- **Transport:** Unix domain sockets (`AF_UNIX`, length-prefixed framing) by default — a
+  faster local-only link with no ZeroMQ — or ZMQ over TCP (PUB/SUB, all sockets conflated —
+  newest message wins) for a networked controller; selectable in the settings screen
+  (**Link → Transport**)
 
 ## How it works
 
@@ -86,7 +87,7 @@ CI builds every push (see the badge above).
 
 ## Python client
 
-[`pylib/`](pylib/) is a pip-installable client library (`pip install ./pylib`, imported as
+[`pylib/`](pylib/README.md) is a pip-installable client library (`pip install ./pylib`, imported as
 `ocl`) exposing the full API — read telemetry, read the RGBD vision stream, and drive the
 player — plus an `ocl` command-line controller that exercises every link feature
 (telemetry, vision-with-PNG-dumps, drive/demo, and a closed-loop roundtrip).
@@ -97,7 +98,8 @@ See [`pylib/README.md`](pylib/README.md) for setup and usage.
 The data plane — control, telemetry, and RGBD vision — is feature-complete, and the
 in-game settings are wired into the live runtime.
 
-- **Transport:** TCP (ZMQ, the default) or UDS (real `AF_UNIX`), chosen in the settings screen.
+- **Transport:** UDS (real `AF_UNIX`, the default) or TCP (ZMQ, for a networked controller),
+  chosen in the settings screen.
   UDS does **not** use JeroMQ's `ipc://` (which is TCP-emulated, not real `AF_UNIX`); instead the
   UDS path drops ZMTP entirely and uses a trivial length-prefixed framing over Java's built-in
   `AF_UNIX` sockets (JEP 380) — the link only needs conflated, fire-and-forget binary messages, so

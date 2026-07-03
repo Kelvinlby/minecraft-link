@@ -18,16 +18,18 @@ classifiers = [
     "Topic :: Games/Entertainment",
 ]
 
-# pyzmq drives the default TCP transport. The UDS transport needs no third-party deps.
-dependencies = ["pyzmq>=25"]
+# The default UDS transport is pure stdlib — the base install has no third-party deps.
+dependencies = []
 
 [project.optional-dependencies]
+# The TCP transport (ZeroMQ PUB/SUB) — only needed for a networked controller.
+tcp = ["pyzmq>=25"]
 # `vision --dump-dir` PNG dumps and VisionFrame.to_numpy().
 vision = ["pillow>=9", "numpy>=1.21"]
 # The live 3D `pointcloud` viewer.
 pointcloud = ["numpy>=1.21", "open3d>=0.17", "matplotlib>=3.5"]
 # Everything, for the full CLI experience.
-all = ["pillow>=9", "numpy>=1.21", "open3d>=0.17", "matplotlib>=3.5"]
+all = ["pyzmq>=25", "pillow>=9", "numpy>=1.21", "open3d>=0.17", "matplotlib>=3.5"]
 
 [project.scripts]
 ocl = "ocl.cli:main"

@@ -17,9 +17,9 @@ telemetry, read the RGBD vision stream, and drive the player.
         f = link.read_vision()                    # newest RGBD frame (needs -Docl.vision=true)
         print(f.w, f.h, f.center_depth_blocks())
 
-Only `pyzmq` is required (for the TCP transport). `numpy`/`pillow` are used lazily and
-only by the optional helpers (`VisionFrame.to_numpy`, `frame_to_png`,
-`frame_to_pointcloud`).
+The default UDS transport needs no third-party dependencies. `pyzmq` is only needed for the
+TCP transport (`pip install open-crafter-link[tcp]`); `numpy`/`pillow` are used lazily and
+only by the optional helpers (`VisionFrame.to_numpy`, `frame_to_png`, `frame_to_pointcloud`).
 
 The package also ships a CLI controller; run `ocl --help` (see `ocl.cli`).
 
@@ -33,15 +33,15 @@ All sockets on both ends use ZMQ_CONFLATE (newest message wins, queue depth 1).
 
 Transports
 ----------
-Two wire transports are supported; pick with ``transport=`` or auto-detected from the
-endpoint strings:
+Two wire transports are supported; pick with ``transport=`` or let it auto-detect from the
+endpoints (default UDS, matching the mod):
 
-* ``"tcp"`` (default) — ZeroMQ PUB/SUB over TCP, as above. Needs only ``pyzmq``.
-* ``"uds"`` — plain ``AF_UNIX`` domain sockets with a ``u32-LE length + payload`` framing
-  (no ZeroMQ). Faster, same-machine only. The payload bytes are identical to TCP mode; only
-  the transport differs. Endpoints are filesystem paths (or ``unix:/path`` / ``ipc:///path``).
-  Roles mirror TCP: the mod is the *server* for telemetry+vision (we connect), and we are the
-  *server* for instructions (the mod connects). No ``pyzmq`` needed for UDS.
+* ``"uds"`` (default) — plain ``AF_UNIX`` domain sockets with a ``u32-LE length + payload``
+  framing (no ZeroMQ). Faster, same-machine only, no third-party deps. Endpoints are filesystem
+  paths (or ``unix:/path`` / ``ipc:///path``). Roles mirror TCP: the mod is the *server* for
+  telemetry+vision (we connect), and we are the *server* for instructions (the mod connects).
+* ``"tcp"`` — ZeroMQ PUB/SUB over TCP, as above; works across a network. Needs ``pyzmq``. Selected
+  automatically when you pass a custom ``tcp://`` endpoint. The payload bytes are identical to UDS.
 
 The default UDS directory matches the mod's resolver (``$XDG_RUNTIME_DIR`` on Linux, or the
 Flatpak app runtime dir inside a sandbox); override with ``--uds-dir``.
@@ -457,11 +457,15 @@ class _UdsInstructionServer:
 class Ocl:
     """High-level client for the Open Crafter Link.
 
-    Lazily creates ZMQ sockets the first time each stream is used, so you only
-    pay for what you touch. Use as a context manager (or call `close()`) to
-    release sockets.
+    Defaults to the UDS transport (matching the mod), so a plain ``Ocl()`` needs no
+    third-party dependencies. Pass ``transport="tcp"`` (or a custom ``tcp://`` endpoint)
+    for a networked controller — that path needs ``pyzmq`` (``pip install open-crafter-link[tcp]``).
 
-        with Ocl() as link:
+    Lazily creates the sockets the first time each stream is used, so you only
+    pay for what you touch. Use as a context manager (or call `close()`) to
+    release them.
+
+        with Ocl() as link:                 # UDS by default
             print(link.read_telemetry())
             link.look(90, 0)
     """
@@ -479,9 +483,17 @@ class Ocl:
         self.telemetry_endpoint = telemetry
         self.vision_endpoint = vision
         self.instruct_endpoint = instruct
-        # Auto-detect transport from the endpoints if not stated: a non-tcp:// endpoint => UDS.
+        # Transport selection when not stated (mirrors the mod, whose default is UDS):
+        #   * any UDS-looking endpoint (a path / unix:/ipc://)         -> UDS
+        #   * a tcp:// endpoint the caller *customized* off the default -> TCP (networked controller)
+        #   * otherwise (untouched defaults)                            -> UDS, the default
         if transport is None:
-            transport = "uds" if _looks_like_uds(telemetry, vision, instruct) else "tcp"
+            if _looks_like_uds(telemetry, vision, instruct):
+                transport = "uds"
+            elif (telemetry, vision, instruct) != (DEFAULT_TELEMETRY, DEFAULT_VISION, DEFAULT_INSTRUCT):
+                transport = "tcp"
+            else:
+                transport = "uds"
         self.transport = transport
         self.uds_dir = uds_dir
 
@@ -494,7 +506,9 @@ class Ocl:
 
         if transport == "tcp":
             if zmq is None:
-                raise ImportError("pyzmq is required for the TCP transport:  uv pip install pyzmq")
+                raise ImportError(
+                    "pyzmq is required for the TCP transport (UDS is the default and needs none): "
+                    "pip install 'open-crafter-link[tcp]'")
             self._owns_ctx = context is None
             self._ctx = context or zmq.Context.instance()
         elif transport != "uds":

@@ -9,11 +9,12 @@ API — read player telemetry, read the RGBD vision stream, and drive the player
 pip install ./pylib
 ```
 
-`pyzmq` (needed for the default TCP transport) is pulled in automatically. `numpy`,
-`pillow`, `open3d` and `matplotlib` are optional and only used by the vision/point-cloud
-helpers — install the extras you want:
+The default **UDS** transport is pure standard library, so the base install has **no
+third-party dependencies**. `pyzmq` (TCP transport), `numpy`, `pillow`, `open3d` and
+`matplotlib` are optional — install the extras you want:
 
 ```bash
+pip install "./pylib[tcp]"         # ZeroMQ TCP transport (networked controller)
 pip install "./pylib[vision]"      # PNG dumps + VisionFrame.to_numpy()
 pip install "./pylib[pointcloud]"  # live 3D RGBD viewer
 pip install "./pylib[all]"         # everything
@@ -52,23 +53,26 @@ Low-level codecs are exported too: `decode_telemetry`, `decode_vision`,
 The link speaks two wire transports; pick one in the mod's settings screen (**Link →
 Transport**) and match it here:
 
-- **TCP** (default) — ZeroMQ PUB/SUB over loopback. Works across a network and needs `pyzmq`.
-- **UDS** — plain `AF_UNIX` domain sockets with a `u32-LE length + payload` framing (no
-  ZeroMQ). Faster and lower-latency, but **same-machine only**. The message payloads are
-  byte-identical to TCP; only the transport differs.
+- **UDS** (default) — plain `AF_UNIX` domain sockets with a `u32-LE length + payload` framing
+  (no ZeroMQ). Faster and lower-latency, no third-party deps, but **same-machine only**.
+- **TCP** — ZeroMQ PUB/SUB over loopback. Works across a network; needs the `[tcp]` extra
+  (`pyzmq`). The message payloads are byte-identical to UDS; only the transport differs.
 
 ```python
-# UDS: auto-resolves the socket directory the same way the mod does
-with Ocl(transport="uds") as link:
+# Default is UDS — auto-resolves the socket directory the same way the mod does:
+with Ocl() as link:
     print(link.read_telemetry())
 
 # pin an explicit directory (must match what the mod uses):
-Ocl(transport="uds", uds_dir="/run/user/1000")
+Ocl(uds_dir="/run/user/1000")
+
+# opt into TCP for a networked controller (needs the [tcp] extra):
+Ocl("tcp://192.168.1.5:5557", "tcp://192.168.1.5:5559", "tcp://*:5558")
 ```
 
-The transport is auto-detected from the endpoint strings when not stated: a `tcp://` endpoint
-selects TCP; a bare path or `unix:`/`ipc://` endpoint selects UDS. On the CLI, use
-`--transport uds` (and optionally `--uds-dir DIR`).
+When the transport isn't stated it defaults to UDS (matching the mod); passing a custom
+`tcp://` endpoint auto-selects TCP, and a `unix:`/`ipc://`/path endpoint selects UDS. On the
+CLI, use `--transport tcp` (and, for TCP, install the `[tcp]` extra) or `--uds-dir DIR`.
 
 **Socket directory.** In UDS mode the three `.sock` files live in a directory both processes
 must agree on. Blank/auto resolves (matching the mod): `$XDG_RUNTIME_DIR`, or — inside a Flatpak

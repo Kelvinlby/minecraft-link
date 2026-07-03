@@ -28,10 +28,10 @@ public final class OclConfigScreen {
 						.option(Option.<OclConfig.Transport>createBuilder()
 								.name(Text.literal("Transport"))
 								.description(OptionDescription.of(Text.literal(
-										"How the mod talks to the Open Crafter controller. TCP (default) uses ZeroMQ "
-												+ "over the network and works with an unmodified controller. UDS uses Unix "
-												+ "domain sockets — faster and lower-latency, but same-machine only and it "
-												+ "needs a controller that speaks the UDS transport.")))
+										"How the mod talks to the Open Crafter controller. UDS (default) uses Unix "
+												+ "domain sockets — faster and lower-latency, but same-machine only. TCP uses "
+												+ "ZeroMQ over the network and works with a remote controller (needs pyzmq on "
+												+ "the controller side).")))
 								.binding(defaults.transport, () -> cfg.transport, v -> cfg.transport = v)
 								.controller(opt -> EnumControllerBuilder.create(opt)
 										.enumClass(OclConfig.Transport.class))
