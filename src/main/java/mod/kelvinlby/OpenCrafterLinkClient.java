@@ -69,7 +69,6 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		// never the GPU (VisionCapture.dispose guards against off-render-thread frees anyway).
 		Runtime.getRuntime().addShutdownHook(new Thread(bridge::stop, "ocl-shutdown"));
 
-		OpenCrafterLink.LOGGER.info("[open-crafter-link] client initialized (vision {})",
-				vision != null ? "enabled" : "disabled");
+		OpenCrafterLink.LOGGER.info("[open-crafter-link] client initialized");
 	}
 }
