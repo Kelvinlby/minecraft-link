@@ -2,8 +2,10 @@ package mod.kelvinlby;
 
 import mod.kelvinlby.config.OclConfig;
 import mod.kelvinlby.link.InputDriver;
+import mod.kelvinlby.link.LinkBridge;
 import mod.kelvinlby.link.LinkConfig;
 import mod.kelvinlby.link.TickDriver;
+import mod.kelvinlby.link.UdsBridge;
 import mod.kelvinlby.link.VisionCapture;
 import mod.kelvinlby.link.ZmqBridge;
 import net.fabricmc.api.ClientModInitializer;
@@ -19,23 +21,41 @@ import java.util.function.IntSupplier;
  * everything down on shutdown.
  */
 public class OpenCrafterLinkClient implements ClientModInitializer {
-	private static ZmqBridge bridge;
+	private static LinkBridge bridge;
 
 	/**
-	 * Rebind the running bridge to the endpoints of the current config. Called from the settings screen
-	 * after a save so a transport change takes effect without restarting the client. No-op before init.
+	 * (Re)build the link for the current config and start it, tearing down any previous bridge first.
+	 * Called at init and from the settings screen after a save, so both an endpoint change <b>and</b> a
+	 * transport switch (TCP&harr;UDS, which needs a different bridge implementation) take effect without
+	 * restarting the client. No-op'ing when there is no prior bridge keeps it safe at init.
 	 */
-	public static void reloadLink() {
+	public static synchronized void reloadLink() {
 		if (bridge != null) {
-			bridge.restart(OclConfig.get().toEndpoints());
+			bridge.stop();
+		}
+		bridge = buildAndStart(OclConfig.get());
+	}
+
+	/** Construct the bridge matching the config's transport and start it on the resolved endpoints. */
+	private static LinkBridge buildAndStart(OclConfig cfg) {
+		switch (cfg.transport) {
+			case UDS -> {
+				UdsBridge uds = new UdsBridge();
+				uds.start(cfg.toUdsEndpoints());
+				return uds;
+			}
+			default -> {
+				ZmqBridge zmq = new ZmqBridge();
+				zmq.start(cfg.toEndpoints());
+				return zmq;
+			}
 		}
 	}
 
 	@Override
 	public void onInitializeClient() {
 		OclConfig cfg = OclConfig.get();
-		bridge = new ZmqBridge();
-		bridge.start(cfg.toEndpoints());
+		bridge = buildAndStart(cfg);
 
 		// Inbound control is stamped onto the real KeyBindings at the HEAD of the client tick (before
 		// input events and entity ticking) so it takes effect this same tick; telemetry is published at

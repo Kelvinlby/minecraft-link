@@ -1,4 +1,4 @@
-# Minecraft Link for Open Crafter
+# Open Crafter Link for Minecraft
 
 [![build](https://img.shields.io/github/actions/workflow/status/Kelvinlby/minecraft-link/build.yml?branch=main&style=for-the-badge&logo=github&label=Build)](https://github.com/Kelvinlby/minecraft-link/actions/workflows/build.yml)
 
@@ -8,7 +8,9 @@ state and a real RGBD view of the world *out*, and applies movement / look / act
 instructions *in* — turning a vanilla client into a controllable embodied environment.
 
 - **Minecraft:** 1.21.11 · **Loader:** Fabric · **Side:** client only
-- **Transport:** ZMQ over TCP (PUB/SUB, all sockets conflated — newest message wins)
+- **Transport:** ZMQ over TCP (PUB/SUB, all sockets conflated — newest message wins), or
+  Unix domain sockets (`AF_UNIX`, length-prefixed framing) for a faster local-only link —
+  selectable in the settings screen (**Link → Transport**)
 
 ## How it works
 
@@ -82,20 +84,26 @@ A standard Fabric/Loom project:
 
 CI builds every push (see the badge above).
 
-## Testing
+## Python client
 
-`tools/ocl_link.py` is a single-file client library (copy it into any Python project for
-the full API) that doubles as a CLI test controller exercising every link feature
+[`pylib/`](pylib/) is a pip-installable client library (`pip install ./pylib`, imported as
+`ocl`) exposing the full API — read telemetry, read the RGBD vision stream, and drive the
+player — plus an `ocl` command-line controller that exercises every link feature
 (telemetry, vision-with-PNG-dumps, drive/demo, and a closed-loop roundtrip).
-See [`tools/README.md`](tools/README.md) for setup and usage.
+See [`pylib/README.md`](pylib/README.md) for setup and usage.
 
 ## Status
 
 The data plane — control, telemetry, and RGBD vision — is feature-complete, and the
 in-game settings are wired into the live runtime.
 
-- **Transport:** TCP only. A Unix-domain-socket option was considered and dropped: the
-  JeroMQ `ipc://` scheme is TCP-emulated rather than real `AF_UNIX`, so it offered no benefit.
+- **Transport:** TCP (ZMQ, the default) or UDS (real `AF_UNIX`), chosen in the settings screen.
+  UDS does **not** use JeroMQ's `ipc://` (which is TCP-emulated, not real `AF_UNIX`); instead the
+  UDS path drops ZMTP entirely and uses a trivial length-prefixed framing over Java's built-in
+  `AF_UNIX` sockets (JEP 380) — the link only needs conflated, fire-and-forget binary messages, so
+  none of ZeroMQ's wire machinery is required. The Python controller (`pylib/`, imported as
+  `ocl`) speaks both. See `pylib/README.md` for the UDS socket paths and the Flatpak-sandbox
+  directory note.
 - **Vision downsampling** maps the framebuffer onto the target resolution per-axis with no
   aspect-ratio correction; pick a camera width/height matching your window aspect to avoid
   a squashed image (the 256×144 default suits a typical 16:9 window).

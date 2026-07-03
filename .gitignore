@@ -39,7 +39,10 @@ replay_*.log
 *.hprof
 *.jfr
 
-# python test tools
+# python client library (pylib)
 
-tools/.venv/
+pylib/.venv/
+pylib/dist/
+pylib/src/*.egg-info/
+*.egg-info/
 __pycache__/

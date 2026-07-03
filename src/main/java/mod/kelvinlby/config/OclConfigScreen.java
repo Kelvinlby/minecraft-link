@@ -5,6 +5,7 @@ import dev.isxander.yacl3.api.Option;
 import dev.isxander.yacl3.api.OptionDescription;
 import dev.isxander.yacl3.api.OptionGroup;
 import dev.isxander.yacl3.api.YetAnotherConfigLib;
+import dev.isxander.yacl3.api.controller.EnumControllerBuilder;
 import dev.isxander.yacl3.api.controller.IntegerSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.StringControllerBuilder;
 import mod.kelvinlby.OpenCrafterLinkClient;
@@ -24,13 +25,33 @@ public final class OclConfigScreen {
 				// ---- Tab: Link ---- (options sit directly on the category; no section needed)
 				.category(ConfigCategory.createBuilder()
 						.name(Text.literal("Link"))
+						.option(Option.<OclConfig.Transport>createBuilder()
+								.name(Text.literal("Transport"))
+								.description(OptionDescription.of(Text.literal(
+										"How the mod talks to the Open Crafter controller. TCP (default) uses ZeroMQ "
+												+ "over the network and works with an unmodified controller. UDS uses Unix "
+												+ "domain sockets — faster and lower-latency, but same-machine only and it "
+												+ "needs a controller that speaks the UDS transport.")))
+								.binding(defaults.transport, () -> cfg.transport, v -> cfg.transport = v)
+								.controller(opt -> EnumControllerBuilder.create(opt)
+										.enumClass(OclConfig.Transport.class))
+								.build())
 						.option(Option.<String>createBuilder()
 								.name(Text.literal("TCP URL"))
 								.description(OptionDescription.of(Text.literal(
-										"ZMQ endpoint URL of the Open Crafter controller (e.g. tcp://127.0.0.1). "
+										"TCP mode only. ZMQ endpoint URL of the Open Crafter controller (e.g. tcp://127.0.0.1). "
 												+ "Its host is used for the inbound instruction stream; the telemetry and "
 												+ "vision streams bind locally on the canonical ports (5557 and 5559).")))
 								.binding(defaults.tcpUrl, () -> cfg.tcpUrl, v -> cfg.tcpUrl = v)
+								.controller(StringControllerBuilder::create)
+								.build())
+						.option(Option.<String>createBuilder()
+								.name(Text.literal("UDS directory"))
+								.description(OptionDescription.of(Text.literal(
+										"UDS mode only. Directory holding the three .sock files. Leave blank to auto-resolve "
+												+ "(uses $XDG_RUNTIME_DIR, or the Flatpak app runtime dir inside a sandbox). Set it "
+												+ "only to pin a specific directory both the mod and controller can see.")))
+								.binding(defaults.udsDir, () -> cfg.udsDir, v -> cfg.udsDir = v)
 								.controller(StringControllerBuilder::create)
 								.build())
 						.build())

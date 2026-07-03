@@ -22,7 +22,7 @@ import java.util.concurrent.locks.LockSupport;
  * the newest payload always wins and stale ones are dropped, in every direction, without the game
  * threads ever blocking.
  */
-public final class ZmqBridge {
+public final class ZmqBridge implements LinkBridge {
 	/** Recreated on each {@link #start}: a {@link ZContext} cannot be reused after {@code close()}. */
 	private ZContext ctx;
 
@@ -84,6 +84,7 @@ public final class ZmqBridge {
 	}
 
 	/** Stop the worker threads and tear down sockets + context. Idempotent. */
+	@Override
 	public synchronized void stop() {
 		if (!running) {
 			return;
@@ -106,11 +107,13 @@ public final class ZmqBridge {
 	}
 
 	/** Tick thread: hand off the latest telemetry. O(1), non-blocking, conflating (newest wins). */
+	@Override
 	public void publish(OutboundSnapshot snapshot) {
 		outbox.set(snapshot);
 	}
 
 	/** Tick thread: consume-and-clear the latest instruction, or {@code null} if none arrived. */
+	@Override
 	public InboundInstruction takeLatest() {
 		return inbox.getAndSet(null);
 	}
@@ -123,6 +126,7 @@ public final class ZmqBridge {
 	 * @param rgba interleaved RGBA8, {@code w*h*4} bytes
 	 * @param depth DEPTH32 native-float bytes, {@code w*h*4} bytes
 	 */
+	@Override
 	public void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth) {
 		visionRaw.set(new RawFrame(w, h, near, far, rgba, depth));
 		LockSupport.unpark(visionWorkerThread);

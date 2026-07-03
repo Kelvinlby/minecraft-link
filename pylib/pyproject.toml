@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-crafter-link"
+version = "1.0.0"
+description = "Python client library and CLI for the Open Crafter Link Minecraft mod: read player telemetry, read the RGBD vision stream, and drive the player."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+authors = [{ name = "kelvinlby" }]
+keywords = ["minecraft", "fabric", "mod", "rgbd", "telemetry", "automation"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Games/Entertainment",
+]
+
+# pyzmq drives the default TCP transport. The UDS transport needs no third-party deps.
+dependencies = ["pyzmq>=25"]
+
+[project.optional-dependencies]
+# `vision --dump-dir` PNG dumps and VisionFrame.to_numpy().
+vision = ["pillow>=9", "numpy>=1.21"]
+# The live 3D `pointcloud` viewer.
+pointcloud = ["numpy>=1.21", "open3d>=0.17", "matplotlib>=3.5"]
+# Everything, for the full CLI experience.
+all = ["pillow>=9", "numpy>=1.21", "open3d>=0.17", "matplotlib>=3.5"]
+
+[project.scripts]
+ocl = "ocl.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kelvinlby/minecraft-link"
+Source = "https://github.com/kelvinlby/minecraft-link"
+
+[tool.setuptools.packages.find]
+where = ["src"]

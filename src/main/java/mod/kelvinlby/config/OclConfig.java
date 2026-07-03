@@ -17,8 +17,10 @@ import java.nio.file.Path;
  * screen ({@link OclConfigScreen}) binds to. It is intentionally a plain mutable holder — the fields
  * are public so the screen's getter/setter lambdas stay trivial.
  *
- * <p>The link transport is TCP. {@link #toEndpoints()} converts these settings into the three ZMQ
- * endpoints the bridge binds/connects; the screen rebuilds them and restarts the bridge on save.
+ * <p>The link transport is {@link #transport}: {@link Transport#TCP} (ZMQ over TCP, the default) or
+ * {@link Transport#UDS} (plain {@code AF_UNIX} domain sockets, faster local-only). {@link #toEndpoints()}
+ * converts these settings into the three ZMQ TCP endpoints; {@link #toUdsEndpoints()} into the three UDS
+ * socket paths. The screen rebuilds whichever the chosen transport needs and restarts the bridge on save.
  *
  * <p>The camera resolution ({@link #cameraWidth}/{@link #cameraHeight}) drives the vision pipeline's
  * downsample target (see {@code OpenCrafterLinkClient} and {@code VisionCapture}); the
@@ -32,9 +34,27 @@ public class OclConfig {
 
 	private static OclConfig instance;
 
+	/** Link transport. Gson serializes enums by name, so no extra persistence wiring is needed. */
+	public enum Transport {
+		/** ZeroMQ over TCP loopback — the default; works across a network and with unmodified pyzmq. */
+		TCP,
+		/** Plain {@code AF_UNIX} domain sockets (length-prefixed framing) — faster, same-machine only. */
+		UDS
+	}
+
 	// --- Link ---
-	/** Base ZMQ TCP URL of the controller, host only (e.g. {@code tcp://127.0.0.1}); ports are canonical. */
+	/** Which transport the link uses. Defaults to {@link Transport#TCP} for backwards compatibility. */
+	public Transport transport = Transport.TCP;
+
+	/** Base ZMQ TCP URL of the controller, host only (e.g. {@code tcp://127.0.0.1}); ports are canonical. Used only in TCP mode. */
 	public String tcpUrl = "tcp://127.0.0.1";
+
+	/**
+	 * Directory holding the three UDS {@code .sock} files (UDS mode only). Blank = auto-resolve
+	 * (Flatpak-sandbox aware; see {@link LinkConfig#resolveUdsDir(String)}). Set it only to pin a
+	 * specific directory both the mod and the controller can see.
+	 */
+	public String udsDir = "";
 
 	// --- Sensors / Camera ---
 	/** Height, in pixels, of the camera frames sent to the controller. */
@@ -91,6 +111,21 @@ public class OclConfig {
 		String sub = firstNonNull(LinkConfig.SUB_ENDPOINT_OVERRIDE, "tcp://" + host + ":" + LinkConfig.INSTRUCTION_PORT);
 		String visPub = firstNonNull(LinkConfig.VIS_PUB_ENDPOINT_OVERRIDE, "tcp://*:" + LinkConfig.VISION_PORT);
 		return new LinkConfig.Endpoints(pub, sub, visPub);
+	}
+
+	/**
+	 * Resolve the three UDS socket paths from this config (UDS mode). The directory is chosen by
+	 * {@link LinkConfig#resolveUdsDir(String)} (honouring {@link #udsDir} / the {@code ocl.udsDir}
+	 * launch override, else auto — Flatpak aware); the three canonical filenames sit inside it. The
+	 * mod BINDs a server socket for telemetry and vision and CONNECTs for instructions, mirroring the
+	 * TCP bind/connect split.
+	 */
+	public LinkConfig.UdsEndpoints toUdsEndpoints() {
+		Path dir = LinkConfig.resolveUdsDir(udsDir);
+		return new LinkConfig.UdsEndpoints(
+				dir.resolve(LinkConfig.UDS_TELEMETRY),
+				dir.resolve(LinkConfig.UDS_INSTRUCTION),
+				dir.resolve(LinkConfig.UDS_VISION));
 	}
 
 	/** Extract the host from a {@code tcp://host[:port]} URL, falling back to localhost if unparseable. */

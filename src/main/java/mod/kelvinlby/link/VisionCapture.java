@@ -27,7 +27,7 @@ import java.util.function.IntSupplier;
  * signalled, its buffers are mapped and <b>nearest-neighbour downsampled directly out of the mapped
  * memory</b> into compact per-texel byte arrays — so the render thread never touches the full-res
  * frame. The heavy float conversion + depth linearization runs on the bridge's vision worker
- * ({@link ZmqBridge#enqueueVisionRaw}).
+ * ({@link LinkBridge#enqueueVisionRaw}).
  *
  * <p>All GPU access is confined to the render thread and guarded with
  * {@link RenderSystem#assertOnRenderThread()}. {@link #dispose()} (also render-thread) frees the GPU
@@ -39,7 +39,7 @@ public final class VisionCapture {
 	/** Eye-space near plane (blocks); GameRenderer's near plane is fixed at 0.05. */
 	private static final float NEAR = 0.05f;
 
-	private final ZmqBridge bridge;
+	private final LinkBridge bridge;
 	private final IntSupplier targetWSupplier;
 	private final IntSupplier targetHSupplier;
 	private final long minIntervalNs;
@@ -82,7 +82,7 @@ public final class VisionCapture {
 	 *                the in-game camera setting take effect without restarting
 	 * @param targetH supplies the downsample target height in pixels (read live, as above)
 	 */
-	public VisionCapture(ZmqBridge bridge, IntSupplier targetW, IntSupplier targetH, int maxHz, boolean boxFilter) {
+	public VisionCapture(LinkBridge bridge, IntSupplier targetW, IntSupplier targetH, int maxHz, boolean boxFilter) {
 		this.bridge = bridge;
 		this.targetWSupplier = targetW;
 		this.targetHSupplier = targetH;

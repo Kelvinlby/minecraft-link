@@ -9,12 +9,12 @@ import net.minecraft.client.network.ClientPlayerEntity;
  * (keypress simulation, rotation, slot) is handled at {@code START_CLIENT_TICK} by {@link InputDriver};
  * keeping the publish at end-of-tick means the values the controller reads back are this tick's result.
  *
- * <p>All work here is lightweight; ZMQ I/O and encoding happen on the bridge's worker threads.
+ * <p>All work here is lightweight; link I/O and encoding happen on the bridge's worker threads.
  */
 public final class TickDriver {
-	private final ZmqBridge bridge;
+	private final LinkBridge bridge;
 
-	public TickDriver(ZmqBridge bridge) {
+	public TickDriver(LinkBridge bridge) {
 		this.bridge = bridge;
 	}
 

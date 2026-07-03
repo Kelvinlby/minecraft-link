@@ -32,12 +32,12 @@ import net.minecraft.util.math.MathHelper;
  * telemetry is published separately at end-of-tick by {@link TickDriver}.
  */
 public final class InputDriver {
-	private final ZmqBridge bridge;
+	private final LinkBridge bridge;
 
 	/** Whether the mod is currently holding any driven key, so it can release them once on silence. */
 	private boolean owningKeys;
 
-	public InputDriver(ZmqBridge bridge) {
+	public InputDriver(LinkBridge bridge) {
 		this.bridge = bridge;
 	}
 
