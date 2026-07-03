@@ -84,8 +84,9 @@ CI builds every push (see the badge above).
 
 ## Testing
 
-`tools/ocl_test_controller.py` stands in for the external controller and exercises every
-link feature (telemetry, vision-with-PNG-dumps, drive/demo, and a closed-loop roundtrip).
+`tools/ocl_link.py` is a single-file client library (copy it into any Python project for
+the full API) that doubles as a CLI test controller exercising every link feature
+(telemetry, vision-with-PNG-dumps, drive/demo, and a closed-loop roundtrip).
 See [`tools/README.md`](tools/README.md) for setup and usage.
 
 ## Status

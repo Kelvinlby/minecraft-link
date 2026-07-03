@@ -1,7 +1,38 @@
-# Open Crafter Link — test tools
+# Open Crafter Link — client library & test tools
 
-`ocl_test_controller.py` stands in for the external controller and exercises every
-link functionality against a running Minecraft client with the mod loaded.
+`ocl_link.py` is a **single-file client library** for the Open Crafter Link. Copy this
+one file into any Python project and you have the full API — read player telemetry,
+read the RGBD vision stream, and drive the player. The only hard dependency is `pyzmq`
+(`numpy`/`pillow`/`open3d` are imported lazily, only by the optional helpers).
+
+The same file is also a CLI test controller that stands in for the external controller
+and exercises every link functionality against a running Minecraft client with the mod
+loaded.
+
+## Library use
+
+```python
+from ocl_link import OclLink
+
+with OclLink() as link:                       # endpoints default to LinkConfig's
+    t = link.read_telemetry()                 # newest player state (or None on timeout)
+    print(t.yaw, t.pitch, t.slot)
+
+    link.look(yaw=90, pitch=0)                # absolute rotation
+    link.set_slot(3)                          # select hotbar slot
+    link.drive(forward=True, sprint=True)     # one instruction
+    link.hold(2.0, forward=True)              # *hold* a movement (republish each tick)
+
+    f = link.read_vision()                    # newest RGBD frame (-Docl.vision=true)
+    if f:
+        print(f.w, f.h, f.center_depth_blocks())
+        rgb, depth = f.to_numpy()             # (h,w,3) and (h,w) float32 (needs numpy)
+```
+
+Custom endpoints: `OclLink(telemetry="tcp://host:5557", vision=..., instruct=...)`.
+Low-level codecs are exported too: `decode_telemetry`, `decode_vision`,
+`encode_instruction`, plus the `Telemetry` / `VisionFrame` / `Instruction` types and the
+`frame_to_png` / `frame_to_pointcloud` / `save_ply` helpers.
 
 ## Setup
 
@@ -34,37 +65,37 @@ Join a world (telemetry and vision only flow while a world is rendering).
 
 All sockets use `ZMQ_CONFLATE` (queue depth 1, newest wins).
 
-## Usage
+## CLI usage
 
 ```bash
 PY=.venv/bin/python
 
 # Player-state telemetry: yaw/pitch/slot + live rate (~20 Hz)
-$PY ocl_test_controller.py telemetry
+$PY ocl_link.py telemetry
 
 # RGBD vision: rate, center-pixel depth, and dump frames to PNG (proves NO HUD)
-$PY ocl_test_controller.py vision --dump-dir /tmp/ocl_frames --frames 3
+$PY ocl_link.py vision --dump-dir /tmp/ocl_frames --frames 3
 #   -> inspect rgb_000.png (world + first-person hand, no hotbar/crosshair)
 #      and depth_000.png (grayscale; nearer = darker)
 
 # Drive the player. Movements must be re-sent each tick to "hold", so --hold N
 # republishes for N seconds. Look is absolute degrees.
-$PY ocl_test_controller.py drive --look 90 0          # face yaw 90
-$PY ocl_test_controller.py drive --forward --sprint --hold 2
-$PY ocl_test_controller.py drive --slot 4 --hold 0    # single shot
-$PY ocl_test_controller.py drive --demo               # walk through every control
+$PY ocl_link.py drive --look 90 0          # face yaw 90
+$PY ocl_link.py drive --forward --sprint --hold 2
+$PY ocl_link.py drive --slot 4 --hold 0    # single shot
+$PY ocl_link.py drive --demo               # walk through every control
 
 # Closed loop: send a rotation, read telemetry back, assert it actually changed
-$PY ocl_test_controller.py roundtrip --yaw 123 --pitch -20
+$PY ocl_link.py roundtrip --yaw 123 --pitch -20
 
 # Dashboard: telemetry + vision rates side by side for 10s
-$PY ocl_test_controller.py all --seconds 10
+$PY ocl_link.py all --seconds 10
 
 # 3D RGBD "box": front face = the in-game image, perpendicular axis = depth
-$PY ocl_test_controller.py pointcloud                       # live, corner view
-$PY ocl_test_controller.py pointcloud --orbit-speed 1       # slowly spin to show depth
-$PY ocl_test_controller.py pointcloud --angle 35 --elevation 25 --depth-scale 1.5
-$PY ocl_test_controller.py pointcloud --save scene.ply      # one frame -> .ply, no GUI
+$PY ocl_link.py pointcloud                       # live, corner view
+$PY ocl_link.py pointcloud --orbit-speed 1       # slowly spin to show depth
+$PY ocl_link.py pointcloud --angle 35 --elevation 25 --depth-scale 1.5
+$PY ocl_link.py pointcloud --save scene.ply      # one frame -> .ply, no GUI
 #   -> a rectangular box seen from a corner: the front face shows the image exactly as
 #      in-game, and each pixel is pushed back along the depth axis by its depth value.
 ```
