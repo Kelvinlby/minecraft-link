@@ -129,52 +129,46 @@ public final class ZmqBridge {
 	}
 
 	private void senderLoop() {
-		ZMQ.Socket pub = ctx.createSocket(SocketType.PUB);
-		try {
-			pub.setConflate(true); // must precede bind
-			pub.bind(endpoints.pub());
+        try (ZMQ.Socket pub = ctx.createSocket(SocketType.PUB)) {
+            pub.setConflate(true); // must precede bind
+            pub.bind(endpoints.pub());
 
-			while (running) {
-				OutboundSnapshot snapshot = outbox.getAndSet(null);
-				if (snapshot == null) {
-					LockSupport.parkNanos(1_000_000L); // ~1ms; nothing fresh to send
-					continue;
-				}
-				// Heavy work (encoding) is fine here — off the tick thread.
-				byte[] payload = BinaryCodec.encodeOutbound(snapshot);
-				pub.send(payload, 0);
-			}
-		} catch (Throwable t) {
-			if (running) {
-				OpenCrafterLink.LOGGER.error("[open-crafter-link] sender loop crashed", t);
-			}
-		} finally {
-			pub.close();
-		}
+            while (running) {
+                OutboundSnapshot snapshot = outbox.getAndSet(null);
+                if (snapshot == null) {
+                    LockSupport.parkNanos(1_000_000L); // ~1ms; nothing fresh to send
+                    continue;
+                }
+                // Heavy work (encoding) is fine here — off the tick thread.
+                byte[] payload = BinaryCodec.encodeOutbound(snapshot);
+                pub.send(payload, 0);
+            }
+        } catch (Throwable t) {
+            if (running) {
+                OpenCrafterLink.LOGGER.error("[open-crafter-link] sender loop crashed", t);
+            }
+        }
 	}
 
 	private void receiverLoop() {
-		ZMQ.Socket sub = ctx.createSocket(SocketType.SUB);
-		try {
-			sub.setConflate(true);                  // must precede connect; requires subscribe-all
-			sub.subscribe(ZMQ.SUBSCRIPTION_ALL);
-			sub.setReceiveTimeOut(LinkConfig.RECV_POLL_MS);
-			sub.connect(endpoints.sub());
+        try (ZMQ.Socket sub = ctx.createSocket(SocketType.SUB)) {
+            sub.setConflate(true);                  // must precede connect; requires subscribe-all
+            sub.subscribe(ZMQ.SUBSCRIPTION_ALL);
+            sub.setReceiveTimeOut(LinkConfig.RECV_POLL_MS);
+            sub.connect(endpoints.sub());
 
-			while (running) {
-				byte[] msg = sub.recv(0); // returns null on timeout, keeping stop() responsive
-				if (msg == null) {
-					continue;
-				}
-				inbox.set(BinaryCodec.decodeInbound(msg)); // conflating: newest instruction wins
-			}
-		} catch (Throwable t) {
-			if (running) {
-				OpenCrafterLink.LOGGER.error("[open-crafter-link] receiver loop crashed", t);
-			}
-		} finally {
-			sub.close();
-		}
+            while (running) {
+                byte[] msg = sub.recv(0); // returns null on timeout, keeping stop() responsive
+                if (msg == null) {
+                    continue;
+                }
+                inbox.set(BinaryCodec.decodeInbound(msg)); // conflating: newest instruction wins
+            }
+        } catch (Throwable t) {
+            if (running) {
+                OpenCrafterLink.LOGGER.error("[open-crafter-link] receiver loop crashed", t);
+            }
+        }
 	}
 
 	/**
@@ -226,34 +220,31 @@ public final class ZmqBridge {
 			float denom = far + near - zNdc * (far - near);
 			float zLinear = (denom != 0.0f) ? (2.0f * near * far) / denom : far; // eye-space blocks
 			float norm = zLinear * invFar;                   // normalize 0..1 by far
-			depth[p] = (norm < 0.0f) ? 0.0f : (norm > 1.0f ? 1.0f : norm);
+			depth[p] = (norm < 0.0f) ? 0.0f : (Math.min(norm, 1.0f));
 		}
 
 		return new VisionFrame(w, h, near, far, rgb, depth);
 	}
 
 	private void visionSenderLoop() {
-		ZMQ.Socket pub = ctx.createSocket(SocketType.PUB);
-		try {
-			pub.setConflate(true); // must precede bind
-			pub.bind(endpoints.visPub());
+        try (ZMQ.Socket pub = ctx.createSocket(SocketType.PUB)) {
+            pub.setConflate(true); // must precede bind
+            pub.bind(endpoints.visPub());
 
-			while (running) {
-				VisionFrame frame = visionOutbox.getAndSet(null);
-				if (frame == null) {
-					LockSupport.parkNanos(2_000_000L); // ~2ms; nothing fresh to send
-					continue;
-				}
-				byte[] payload = BinaryCodec.encodeVision(frame);
-				pub.send(payload, 0);
-			}
-		} catch (Throwable t) {
-			if (running) {
-				OpenCrafterLink.LOGGER.error("[open-crafter-link] vision sender loop crashed", t);
-			}
-		} finally {
-			pub.close();
-		}
+            while (running) {
+                VisionFrame frame = visionOutbox.getAndSet(null);
+                if (frame == null) {
+                    LockSupport.parkNanos(2_000_000L); // ~2ms; nothing fresh to send
+                    continue;
+                }
+                byte[] payload = BinaryCodec.encodeVision(frame);
+                pub.send(payload, 0);
+            }
+        } catch (Throwable t) {
+            if (running) {
+                OpenCrafterLink.LOGGER.error("[open-crafter-link] vision sender loop crashed", t);
+            }
+        }
 	}
 
 	private static void joinQuietly(Thread t) {
