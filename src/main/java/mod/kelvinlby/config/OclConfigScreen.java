@@ -63,6 +63,31 @@ public final class OclConfigScreen {
 										.build())
 								.build())
 						.build())
+				// ---- Tab: Recording ----
+				.category(ConfigCategory.createBuilder()
+						.name(Text.literal("Recording"))
+						.group(OptionGroup.createBuilder()
+								.name(Text.literal("Resolution"))
+								.option(Option.<Integer>createBuilder()
+										.name(Text.literal("Width"))
+										.description(OptionDescription.of(Text.literal(
+												"Width, in pixels, of recorded frames.")))
+										.binding(defaults.recordingWidth, () -> cfg.recordingWidth, v -> cfg.recordingWidth = v)
+										.controller(opt -> IntegerSliderControllerBuilder.create(opt)
+												.range(16, 1920)
+												.step(1))
+										.build())
+								.option(Option.<Integer>createBuilder()
+										.name(Text.literal("Height"))
+										.description(OptionDescription.of(Text.literal(
+												"Height, in pixels, of recorded frames.")))
+										.binding(defaults.recordingHeight, () -> cfg.recordingHeight, v -> cfg.recordingHeight = v)
+										.controller(opt -> IntegerSliderControllerBuilder.create(opt)
+												.range(16, 1080)
+												.step(1))
+										.build())
+								.build())
+						.build())
 				// Persist, then rebind the bridge so a changed TCP URL takes effect without a client restart.
 				.save(() -> {
 					cfg.save();

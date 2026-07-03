@@ -42,6 +42,12 @@ public class OclConfig {
 	/** Width, in pixels, of the camera frames sent to the controller. */
 	public int cameraWidth = 256;
 
+	// --- Recording ---
+	/** Height, in pixels, of recorded frames. Not yet wired to any recording logic. */
+	public int recordingHeight = 720;
+	/** Width, in pixels, of recorded frames. Not yet wired to any recording logic. */
+	public int recordingWidth = 1280;
+
 	/** Shared singleton so the Mod Menu factory and any future runtime reader see the same state. */
 	public static OclConfig get() {
 		if (instance == null) {
