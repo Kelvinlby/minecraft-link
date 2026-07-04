@@ -12,7 +12,9 @@ import mod.kelvinlby.recorder.Recorder;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
+import net.minecraft.util.Identifier;
 
 import java.util.function.IntSupplier;
 
@@ -92,10 +94,12 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		ClientTickEvents.END_CLIENT_TICK.register(recorder.actionReader()::onClientTick);
 		recorder.syncTo(cfg.recordDataset, cfg.recordSampleHz);
 
-		// Vision: capture the 3D world (incl. first-person hand) at END_MAIN, before the HUD draws.
-		// Frame resolution comes live from the in-game settings screen (OclConfig), so adjusting the
-		// camera sliders takes effect without restarting; the ocl.visionWidth/Height launch properties,
-		// when set, pin it to a fixed override.
+		// Vision: capture the 3D world (incl. first-person hand) across two seams within a frame — depth at
+		// END_MAIN (where the main framebuffer's depth is written), colour at the first HUD element (after
+		// the world + any shader-pack composite, before HUD overlays). This makes colour correct in vanilla
+		// and under Iris/Sodium alike (see VisionCapture). Frame resolution comes live from the in-game
+		// settings screen (OclConfig), so adjusting the camera sliders takes effect without restarting; the
+		// ocl.visionWidth/Height launch properties, when set, pin it to a fixed override.
 		IntSupplier visionW = (LinkConfig.VISION_TARGET_W != null)
 				? LinkConfig.VISION_TARGET_W::intValue : () -> cfg.cameraWidth;
 		IntSupplier visionH = (LinkConfig.VISION_TARGET_H != null)
@@ -103,6 +107,8 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		final VisionCapture vision = new VisionCapture(OpenCrafterLinkClient::bridge, visionW, visionH,
 				LinkConfig.VISION_MAX_HZ, LinkConfig.VISION_BOX_FILTER);
 		WorldRenderEvents.END_MAIN.register(ctx -> vision.onWorldRenderEnd());
+		HudElementRegistry.addFirst(Identifier.of("open-crafter-link", "vision_capture"),
+				(context, tickCounter) -> vision.onHudRenderFirst());
 
 		// Tear down on normal client stop. CLIENT_STOPPING runs on the render/main thread, so the GPU
 		// buffers can be freed here directly — before the bridge threads are joined.

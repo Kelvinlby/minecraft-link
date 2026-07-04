@@ -18,9 +18,20 @@ import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 /**
- * Real RGBD vision: reads the main framebuffer's colour + depth attachments on the render thread, at
- * the {@code WorldRenderEvents.END_MAIN} seam — after the full 3D world (including the first-person
- * hand) but before the HUD — so the captured frame is the pure 3D scene with no overlay.
+ * Real RGBD vision: reads the main framebuffer's colour + depth attachments on the render thread and
+ * hands off compact, already-downsampled RGBD frames to the bridge.
+ *
+ * <p><b>Two capture seams per frame.</b> Depth is read at {@code WorldRenderEvents.END_MAIN} (the
+ * terminal world-render phase), where the main framebuffer's depth attachment is fully written.
+ * Colour, however, cannot be read there in every rendering environment: under Iris (shader packs) the
+ * world is rendered into Iris's own deferred G-buffers and only composited back onto MC's main
+ * framebuffer colour attachment during Iris's post/composite passes, which run <em>after</em>
+ * {@code END_MAIN}. At {@code END_MAIN} the colour texture would hold only the cleared sky colour. So
+ * colour is instead read at the <b>first HUD element</b> seam ({@code HudElementRegistry.addFirst}),
+ * which runs after the world + any shader composite but before any HUD overlay draws — valid in
+ * vanilla and under Iris/Sodium alike, with no dependency on Iris classes. {@code END_MAIN} arms a
+ * slot (issues the depth copy, records {@code far}/size); the HUD seam completes it (issues the colour
+ * copy). See {@link #onWorldRenderEnd()} and {@link #onHudRenderFirst()}.
  *
  * <p>The GPU&rarr;CPU copy is asynchronous ({@link CommandEncoder#copyTextureToBuffer}); a small ring of
  * read-back buffers ({@link #RING} deep) lets the render thread issue a copy and pick up an
@@ -57,6 +68,15 @@ public final class VisionCapture {
 	private Slot[] ring;
 	private volatile boolean disposed;
 
+	/** Monotonic capture counter; stamped onto a slot at {@code END_MAIN} for cross-seam matching/debugging. */
+	private long frameCounter;
+	/**
+	 * The slot {@link #onWorldRenderEnd()} armed this frame (depth copy issued) that
+	 * {@link #onHudRenderFirst()} must complete with the colour copy. {@code null} when no slot is armed.
+	 * Render thread only (both seams run on the render thread), so no synchronization is needed.
+	 */
+	private Slot armedSlot;
+
 	/**
 	 * A lazily-created GL framebuffer object used solely to read the depth attachment. MC's
 	 * {@link CommandEncoder#copyTextureToBuffer} always attaches the source texture as
@@ -67,13 +87,24 @@ public final class VisionCapture {
 	 */
 	private int depthFbo;
 
-	/** One ring entry: a colour + depth read-back buffer pair plus its in-flight state. */
+	/** Slot lifecycle across the two capture seams. */
+	private enum State {
+		/** Reusable — no capture in progress. */
+		FREE,
+		/** {@code END_MAIN} issued the depth copy; the HUD seam must still issue the colour copy. */
+		AWAIT_COLOR_ISSUE,
+		/** Both copies issued; drain once {@code colorReady && depthReady}. */
+		IN_FLIGHT
+	}
+
+	/** One ring entry: a colour + depth read-back buffer pair plus its cross-seam state. */
 	private static final class Slot {
 		GpuBuffer color;
 		GpuBuffer depth;
 		volatile boolean colorReady;
 		volatile boolean depthReady;
-		boolean pending;
+		State state = State.FREE;
+		long frameId;
 		int srcW;
 		int srcH;
 		float far;
@@ -93,8 +124,12 @@ public final class VisionCapture {
 	}
 
 	/**
-	 * Invoked from the {@code WorldRenderEvents.END_MAIN} callback (the context is unused — the
-	 * framebuffer and far plane come from {@link MinecraftClient}). Runs on the render thread.
+	 * Seam A. Invoked from the {@code WorldRenderEvents.END_MAIN} callback (the context is unused — the
+	 * framebuffer and far plane come from {@link MinecraftClient}). Drains completed frames, makes the
+	 * once-per-frame throttle decision, and — if capturing this frame — issues the depth read-back and
+	 * <b>arms</b> a slot for {@link #onHudRenderFirst()} to complete with the colour read-back. The
+	 * colour attachment is deliberately <em>not</em> copied here: under Iris it holds only the cleared
+	 * sky colour until the post-composite passes that run after this seam. Runs on the render thread.
 	 */
 	public void onWorldRenderEnd() {
 		if (disposed) {
@@ -107,7 +142,7 @@ public final class VisionCapture {
 		if (fb == null) {
 			return;
 		}
-		GpuTexture colorTex = fb.getColorAttachment();
+		GpuTexture colorTex = fb.getColorAttachment(); // read for size only; contents copied at the HUD seam
 		GpuTexture depthTex = fb.getDepthAttachment();
 		if (colorTex == null || depthTex == null) {
 			return; // depth not always present (e.g. some custom framebuffers); bail safely
@@ -123,10 +158,19 @@ public final class VisionCapture {
 		// First drain any completed copies (this is what actually produces frames).
 		drainReadySlots();
 
-		// Throttle the rate at which we issue new captures.
+		// If we armed a slot last frame but the HUD seam never fired (e.g. a pause/menu screen opened
+		// between END_MAIN and the HUD), reclaim it: skip that depth-only frame rather than emit it, and
+		// don't leak a ring slot.
+		if (armedSlot != null) {
+			OpenCrafterLink.LOGGER.debug("[open-crafter-link] vision: HUD seam missed frame {}; reclaiming slot", armedSlot.frameId);
+			armedSlot.state = State.FREE;
+			armedSlot = null;
+		}
+
+		// Throttle the rate at which we issue new captures — decided once, here, for both seams.
 		long now = System.nanoTime();
 		if (now - lastCaptureNs < minIntervalNs) {
-			return;
+			return; // armedSlot already null: HUD seam will do nothing this frame
 		}
 
 		Slot slot = freeSlot();
@@ -137,16 +181,55 @@ public final class VisionCapture {
 		slot.srcW = w;
 		slot.srcH = h;
 		slot.far = mc.gameRenderer.getFarPlaneDistance();
+		slot.frameId = ++frameCounter;
 		slot.colorReady = false;
 		slot.depthReady = false;
-		slot.pending = true;
+		slot.state = State.AWAIT_COLOR_ISSUE;
 
-		// Colour goes through MC's async GPU->CPU copy. Depth cannot (see copyDepthToBuffer): we issue
-		// our own asynchronous glReadPixels into the same kind of read-back PBO and fence it identically,
-		// so the render thread never blocks on either readback — no frame-rate cost.
+		// Depth cannot go through MC's async copy (see copyDepthToBuffer): we issue our own asynchronous
+		// glReadPixels into a read-back PBO and fence it, so the render thread never blocks — no frame-rate
+		// cost. The colour copy is issued at the HUD seam, once the composited image is present.
+		copyDepthToBuffer(depthTex, slot.depth, w, h, () -> slot.depthReady = true);
+		armedSlot = slot;
+	}
+
+	/**
+	 * Seam B. Invoked from the first HUD element ({@code HudElementRegistry.addFirst}), after the world
+	 * and any shader-pack composite have been drawn to the main framebuffer's colour attachment but
+	 * before any HUD overlay — so the captured colour is the pure 3D scene. Completes the slot armed by
+	 * {@link #onWorldRenderEnd()} by issuing its asynchronous colour read-back. The {@code DrawContext}
+	 * / tick counter are unused: the framebuffer comes from {@link MinecraftClient} directly. Runs on the
+	 * render thread.
+	 */
+	public void onHudRenderFirst() {
+		if (disposed) {
+			return;
+		}
+		RenderSystem.assertOnRenderThread();
+
+		Slot slot = armedSlot;
+		armedSlot = null;
+		if (slot == null) {
+			return; // this frame was throttled, had no free slot, or capture is disabled — nothing to complete
+		}
+
+		MinecraftClient mc = MinecraftClient.getInstance();
+		Framebuffer fb = mc.getFramebuffer();
+		GpuTexture colorTex = (fb != null) ? fb.getColorAttachment() : null;
+		if (colorTex == null) {
+			slot.state = State.FREE; // abandon this frame; the depth copy already issued will simply be overwritten later
+			return;
+		}
+		// The framebuffer changed size between the two seams (should not happen mid-frame): the depth PBO
+		// was sized for the old dimensions, so abandon rather than pair mismatched planes.
+		if (colorTex.getWidth(0) != slot.srcW || colorTex.getHeight(0) != slot.srcH) {
+			slot.state = State.FREE;
+			return;
+		}
+
 		CommandEncoder enc = RenderSystem.getDevice().createCommandEncoder();
 		enc.copyTextureToBuffer(colorTex, slot.color, 0L, () -> slot.colorReady = true, 0);
-		copyDepthToBuffer(depthTex, slot.depth, w, h, () -> slot.depthReady = true);
+		slot.state = State.IN_FLIGHT;
 	}
 
 	/**
@@ -194,7 +277,7 @@ public final class VisionCapture {
 		targetH = Math.max(1, targetHSupplier.getAsInt());
 		CommandEncoder enc = RenderSystem.getDevice().createCommandEncoder();
 		for (Slot slot : ring) {
-			if (!slot.pending || !slot.colorReady || !slot.depthReady) {
+			if (slot.state != State.IN_FLIGHT || !slot.colorReady || !slot.depthReady) {
 				continue;
 			}
 			byte[] rgba;
@@ -205,7 +288,7 @@ public final class VisionCapture {
 			try (GpuBuffer.MappedView dv = enc.mapBuffer(slot.depth, true, false)) {
 				depth = downsampleDepth(dv.data(), slot.srcW, slot.srcH);
 			}
-			slot.pending = false; // free immediately for reuse
+			slot.state = State.FREE; // free immediately for reuse
 			bridge.get().enqueueVisionRaw(targetW, targetH, NEAR, slot.far, rgba, depth);
 		}
 	}
@@ -312,6 +395,7 @@ public final class VisionCapture {
 		fbW = w;
 		fbH = h;
 		lastCaptureNs = 0L;
+		armedSlot = null; // any slot armed before the resize belonged to the old ring
 	}
 
 	private Slot freeSlot() {
@@ -319,7 +403,7 @@ public final class VisionCapture {
 			return null;
 		}
 		for (Slot slot : ring) {
-			if (!slot.pending) {
+			if (slot.state == State.FREE) {
 				return slot;
 			}
 		}
@@ -341,6 +425,7 @@ public final class VisionCapture {
 		ring = null;
 		fbW = -1;
 		fbH = -1;
+		armedSlot = null;
 	}
 
 	/** Free all GPU buffers. Must run on the render thread (called from {@code CLIENT_STOPPING}). */
