@@ -8,6 +8,7 @@ import dev.isxander.yacl3.api.YetAnotherConfigLib;
 import dev.isxander.yacl3.api.controller.EnumControllerBuilder;
 import dev.isxander.yacl3.api.controller.IntegerSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.StringControllerBuilder;
+import dev.isxander.yacl3.api.controller.TickBoxControllerBuilder;
 import mod.kelvinlby.OpenCrafterLinkClient;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.text.Text;
@@ -87,32 +88,36 @@ public final class OclConfigScreen {
 				// ---- Tab: Recording ----
 				.category(ConfigCategory.createBuilder()
 						.name(Text.literal("Recording"))
-						.group(OptionGroup.createBuilder()
-								.name(Text.literal("Resolution"))
-								.option(Option.<Integer>createBuilder()
-										.name(Text.literal("Width"))
-										.description(OptionDescription.of(Text.literal(
-												"Width, in pixels, of recorded frames.")))
-										.binding(defaults.recordingWidth, () -> cfg.recordingWidth, v -> cfg.recordingWidth = v)
-										.controller(opt -> IntegerSliderControllerBuilder.create(opt)
-												.range(16, 1920)
-												.step(1))
-										.build())
-								.option(Option.<Integer>createBuilder()
-										.name(Text.literal("Height"))
-										.description(OptionDescription.of(Text.literal(
-												"Height, in pixels, of recorded frames.")))
-										.binding(defaults.recordingHeight, () -> cfg.recordingHeight, v -> cfg.recordingHeight = v)
-										.controller(opt -> IntegerSliderControllerBuilder.create(opt)
-												.range(16, 1080)
-												.step(1))
-										.build())
+						.option(Option.<Boolean>createBuilder()
+								.name(Text.literal("Record dataset"))
+								.description(OptionDescription.of(Text.literal(
+										"Capture aligned RGBD frames + player actions to a dataset under "
+												+ "<gameDir>/open-crafter-link/<timestamp>/. Toggling this starts a fresh "
+												+ "session (on enable) or finalizes the current one (on disable) when you "
+												+ "save. Frames are recorded at the camera resolution set on the Sensors "
+												+ "tab.")))
+								.binding(defaults.recordDataset, () -> cfg.recordDataset, v -> cfg.recordDataset = v)
+								.controller(TickBoxControllerBuilder::create)
+								.build())
+						.option(Option.<Integer>createBuilder()
+								.name(Text.literal("Sample rate"))
+								.description(OptionDescription.of(Text.literal(
+										"How many aligned samples to record per second. 20 Hz matches Minecraft's "
+												+ "tick rate (one sample per tick). A rate change takes effect on the next "
+												+ "session (stop and restart recording).")))
+								.binding(defaults.recordSampleHz, () -> cfg.recordSampleHz, v -> cfg.recordSampleHz = v)
+								.controller(opt -> IntegerSliderControllerBuilder.create(opt)
+										.range(1, 60)
+										.step(1)
+										.formatValue(v -> Text.literal(v + " Hz")))
 								.build())
 						.build())
-				// Persist, then rebind the bridge so a changed TCP URL takes effect without a client restart.
+				// Persist, rebind the bridge (so a changed TCP URL takes effect live), then reconcile the
+				// recorder to the toggle so enabling/disabling "Record dataset" starts/stops a session now.
 				.save(() -> {
 					cfg.save();
 					OpenCrafterLinkClient.reloadLink();
+					OpenCrafterLinkClient.recorder().syncTo(cfg.recordDataset, cfg.recordSampleHz);
 				})
 				.build()
 				.generateScreen(parent);

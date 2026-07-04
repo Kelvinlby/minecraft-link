@@ -26,6 +26,11 @@ import java.nio.file.Path;
  * <p>The camera resolution ({@link #cameraWidth}/{@link #cameraHeight}) drives the vision pipeline's
  * downsample target (see {@code OpenCrafterLinkClient} and {@code VisionCapture}); the
  * {@code ocl.visionWidth}/{@code ocl.visionHeight} launch properties override it when set.
+ *
+ * <p>The recorder toggle ({@link #recordDataset}) and rate ({@link #recordSampleHz}) drive the dataset
+ * {@code Recorder}: the screen calls {@code Recorder#syncTo} on save so flipping the toggle starts or
+ * finalizes a session live. The recorder taps the link's existing vision frames, so it records at the
+ * camera resolution above — there is no separate recording resolution.
  */
 public class OclConfig {
 
@@ -60,15 +65,20 @@ public class OclConfig {
 
 	// --- Sensors / Camera ---
 	/** Height, in pixels, of the camera frames sent to the controller. */
-	public int cameraHeight = 144;
+	public int cameraHeight = 432;
 	/** Width, in pixels, of the camera frames sent to the controller. */
-	public int cameraWidth = 256;
+	public int cameraWidth = 768;
 
 	// --- Recording ---
-	/** Height, in pixels, of recorded frames. Not yet wired to any recording logic. */
-	public int recordingHeight = 720;
-	/** Width, in pixels, of recorded frames. Not yet wired to any recording logic. */
-	public int recordingWidth = 1280;
+	/**
+	 * Whether a dataset-recording session is active. Toggling this in the settings screen starts (on
+	 * enable) or finalizes (on disable) a session on save; see {@code Recorder#syncTo}. Frames are
+	 * recorded at the link camera resolution ({@link #cameraWidth}/{@link #cameraHeight}) — the recorder
+	 * taps the link's existing vision pipeline rather than rendering its own.
+	 */
+	public boolean recordDataset = false;
+	/** Recorder sample rate in Hz (aligned RGBD-frame + action-set samples per second). Default = one per vanilla tick. */
+	public int recordSampleHz = 20;
 
 	/** Shared singleton so the Mod Menu factory and any future runtime reader see the same state. */
 	public static OclConfig get() {

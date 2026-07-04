@@ -4,18 +4,19 @@ import mod.kelvinlby.OpenCrafterLink;
 import mod.kelvinlby.link.VisionFrame;
 import org.jcodec.api.awt.AWTSequenceEncoder;
 
+import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferUShort;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.Writer;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.zip.Deflater;
-import java.util.zip.DeflaterOutputStream;
+import java.util.zip.CRC32;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * Owns one recording session's on-disk output and writes each {@link Sample} to it. Called only from
@@ -26,9 +27,13 @@ import java.util.zip.DeflaterOutputStream;
  * <ul>
  *   <li>{@code rgb.mp4} — H.264 (JCodec), one frame per sample, fps = the recorder's sample rate.
  *       RGB comes from {@link VisionFrame#rgb()} (float 0..1, top-left origin).</li>
- *   <li>{@code depth.f32.zz} — a single zlib ({@link Deflater}) stream of the raw float32 depth planes
- *       concatenated, {@code width*height} little-endian floats per sample, in sample order. Lossless
- *       (no quantization). The header line of {@code actions.jsonl}'s manifest records width/height.</li>
+ *   <li>{@code depth.png.zip} — a ZIP holding one 16-bit grayscale PNG per sample, named
+ *       {@code 000000.png}, {@code 000001.png}, … in sample order. Each pixel is the frame's
+ *       normalized depth ({@code distance/far}, 0..1) quantized to uint16 via
+ *       {@code round(clamp(depth,0,1) * 65535)}; recover absolute blocks as {@code value/65535*far}.
+ *       PNG's per-scanline filtering compresses the smooth depth image far better than raw float32,
+ *       and 16 bits (≈ far/65536 resolution) is effectively lossless for the render. The manifest and
+ *       each {@code actions.jsonl} line record width/height and near/far.</li>
  *   <li>{@code actions.jsonl} — one JSON object per line per sample: seqno, timestamp, every action
  *       field, the frame's near/far (so absolute depth is recoverable), and {@code frameRepeated}.</li>
  *   <li>{@code manifest.json} — session metadata + final counts, written on {@link #close(long, long, long)}.</li>
@@ -45,17 +50,23 @@ public final class DatasetWriter {
 	private final long startEpochMs;
 
 	private AWTSequenceEncoder rgbEncoder;
-	private OutputStream depthOut;   // DeflaterOutputStream over a buffered file stream
-	private Writer actionsOut;       // actions.jsonl
+	private ZipOutputStream depthZip; // one 16-bit grayscale PNG per sample
+	private Writer actionsOut;        // actions.jsonl
+
+	/** Monotonic index for depth PNG entry names; only advanced for size-matching frames. */
+	private int depthFrameIndex;
 
 	/** Fixed once the first frame arrives; later frames of a different size are skipped for video/depth. */
 	private int width = -1;
 	private int height = -1;
 
-	/** Reused per-frame scratch so we don't reallocate the BufferedImage/byte[] every sample. */
+	/** Reused per-frame scratch so we don't reallocate the BufferedImage/arrays every sample. */
 	private BufferedImage frameImage;
 	private int[] pixelScratch;
-	private byte[] depthScratch;
+
+	/** 16-bit grayscale image reused for depth PNG encoding, plus a direct handle to its backing array. */
+	private BufferedImage depthImage;
+	private short[] depthPixels;
 
 	public DatasetWriter(Path dir, int fps) {
 		this.dir = dir;
@@ -67,9 +78,11 @@ public final class DatasetWriter {
 	public void open() throws IOException {
 		Files.createDirectories(dir);
 		rgbEncoder = AWTSequenceEncoder.createSequenceEncoder(dir.resolve("rgb.mp4").toFile(), fps);
-		depthOut = new DeflaterOutputStream(
-				new BufferedOutputStream(Files.newOutputStream(dir.resolve("depth.f32.zz"))),
-				new Deflater(Deflater.DEFAULT_COMPRESSION), 64 * 1024);
+		// PNG is already DEFLATE-compressed internally, so store entries uncompressed (STORED) rather
+		// than paying a second, futile DEFLATE pass over them.
+		depthZip = new ZipOutputStream(
+				new BufferedOutputStream(Files.newOutputStream(dir.resolve("depth.png.zip"))));
+		depthZip.setMethod(ZipOutputStream.STORED);
 		actionsOut = Files.newBufferedWriter(dir.resolve("actions.jsonl"), StandardCharsets.UTF_8);
 		OpenCrafterLink.LOGGER.info("[open-crafter-link] recording to {}", dir);
 	}
@@ -103,14 +116,33 @@ public final class DatasetWriter {
 		rgbEncoder.encodeImage(frameImage);
 	}
 
-	/** Write the frame's depth plane as {@code width*height} little-endian float32 into the deflate stream. */
+	/**
+	 * Quantize the frame's normalized depth to uint16 and append it as a 16-bit grayscale PNG entry to
+	 * {@code depth.png.zip}. Entries are {@code STORED} (PNG carries its own DEFLATE), so we encode the
+	 * PNG into memory first to know its size + CRC before opening the ZIP entry.
+	 */
 	private void writeDepth(VisionFrame v) throws IOException {
 		float[] depth = v.depth();
-		ByteBuffer bb = ByteBuffer.wrap(depthScratch).order(ByteOrder.LITTLE_ENDIAN);
-		for (float d : depth) {
-			bb.putFloat(d);
+		short[] px = depthPixels;
+		for (int i = 0; i < px.length; i++) {
+			float d = depth[i];
+			d = d < 0.0f ? 0.0f : Math.min(d, 1.0f);
+			px[i] = (short) Math.round(d * 65535.0f); // stored as unsigned 16-bit gray
 		}
-		depthOut.write(depthScratch, 0, depth.length * 4);
+		ByteArrayOutputStream pngBytes = new ByteArrayOutputStream(width * height * 2);
+		ImageIO.write(depthImage, "png", pngBytes);
+		byte[] png = pngBytes.toByteArray();
+
+		CRC32 crc = new CRC32();
+		crc.update(png);
+		ZipEntry entry = new ZipEntry(String.format("%06d.png", depthFrameIndex++));
+		entry.setMethod(ZipEntry.STORED);
+		entry.setSize(png.length);
+		entry.setCompressedSize(png.length);
+		entry.setCrc(crc.getValue());
+		depthZip.putNextEntry(entry);
+		depthZip.write(png);
+		depthZip.closeEntry();
 	}
 
 	private void writeActionLine(Sample s, boolean sizeOk) throws IOException {
@@ -158,22 +190,22 @@ public final class DatasetWriter {
 		} catch (IOException | RuntimeException e) {
 			OpenCrafterLink.LOGGER.error("[open-crafter-link] failed to finalize rgb.mp4", e);
 		}
-		closeQuietly(depthOut, "depth.f32.zz");
+		closeQuietly(depthZip, "depth.png.zip");
 		closeQuietly(actionsOut, "actions.jsonl");
 		writeManifest(samples, dropped, repeated);
 	}
 
 	private void writeManifest(long samples, long dropped, long repeated) {
 		String json = "{\n"
-				+ "  \"schema_version\": 1,\n"
+				+ "  \"schema_version\": 2,\n"
 				+ "  \"start_epoch_ms\": " + startEpochMs + ",\n"
 				+ "  \"sample_hz\": " + fps + ",\n"
 				+ "  \"width\": " + width + ",\n"
 				+ "  \"height\": " + height + ",\n"
 				+ "  \"rgb\": \"rgb.mp4\",\n"
 				+ "  \"rgb_codec\": \"h264\",\n"
-				+ "  \"depth\": \"depth.f32.zz\",\n"
-				+ "  \"depth_format\": \"deflate(float32-le, width*height per frame, top-left origin, normalized 0..1 = distance/far)\",\n"
+				+ "  \"depth\": \"depth.png.zip\",\n"
+				+ "  \"depth_format\": \"zip of 16-bit grayscale PNG per frame (000000.png..), top-left origin, value = round(distance/far * 65535); recover blocks as value/65535*far\",\n"
 				+ "  \"actions\": \"actions.jsonl\",\n"
 				+ "  \"samples\": " + samples + ",\n"
 				+ "  \"dropped\": " + dropped + ",\n"
@@ -189,7 +221,8 @@ public final class DatasetWriter {
 	private void allocScratch() {
 		frameImage = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
 		pixelScratch = new int[width * height];
-		depthScratch = new byte[width * height * 4];
+		depthImage = new BufferedImage(width, height, BufferedImage.TYPE_USHORT_GRAY);
+		depthPixels = ((DataBufferUShort) depthImage.getRaster().getDataBuffer()).getData();
 	}
 
 	private static int clamp8(float f) {

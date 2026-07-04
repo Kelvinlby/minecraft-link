@@ -8,6 +8,7 @@ import mod.kelvinlby.link.TickDriver;
 import mod.kelvinlby.link.UdsBridge;
 import mod.kelvinlby.link.VisionCapture;
 import mod.kelvinlby.link.ZmqBridge;
+import mod.kelvinlby.recorder.Recorder;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -22,6 +23,14 @@ import java.util.function.IntSupplier;
  */
 public class OpenCrafterLinkClient implements ClientModInitializer {
 	private static LinkBridge bridge;
+
+	/** The dataset recorder. One per client; the settings screen drives it via {@link #recorder()}. */
+	private static final Recorder recorder = new Recorder();
+
+	/** The dataset recorder, so the settings screen can {@code syncTo} the "Record dataset" toggle on save. */
+	public static Recorder recorder() {
+		return recorder;
+	}
 
 	/**
 	 * (Re)build the link for the current config and start it, tearing down any previous bridge first.
@@ -76,6 +85,13 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		TickDriver driver = new TickDriver(OpenCrafterLinkClient::bridge);
 		ClientTickEvents.END_CLIENT_TICK.register(driver::onEndClientTick);
 
+		// Dataset recorder: observe the human's live inputs each tick (ActionReader reads KeyBinding.pressed
+		// + player state, which are only safe on the client thread). Registered after the TickDriver so the
+		// action read follows the driver's telemetry snapshot within the same END tick. syncTo starts a
+		// session now if "Record dataset" was left enabled in a previous run.
+		ClientTickEvents.END_CLIENT_TICK.register(recorder.actionReader()::onClientTick);
+		recorder.syncTo(cfg.recordDataset, cfg.recordSampleHz);
+
 		// Vision: capture the 3D world (incl. first-person hand) at END_MAIN, before the HUD draws.
 		// Frame resolution comes live from the in-game settings screen (OclConfig), so adjusting the
 		// camera sliders takes effect without restarting; the ocl.visionWidth/Height launch properties,
@@ -91,13 +107,17 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		// Tear down on normal client stop. CLIENT_STOPPING runs on the render/main thread, so the GPU
 		// buffers can be freed here directly — before the bridge threads are joined.
 		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
+			recorder.stop();   // finalize any open session (flush rgb.mp4 moov + write manifest) before teardown
 			vision.dispose();
 			bridge().stop();
 		});
 		// JVM shutdown hook as a belt-and-suspenders for crashes that skip the lifecycle event. This
 		// runs on an arbitrary thread with a possibly-dead GL context, so it touches the bridge only —
 		// never the GPU (VisionCapture.dispose guards against off-render-thread frees anyway).
-		Runtime.getRuntime().addShutdownHook(new Thread(() -> bridge().stop(), "ocl-shutdown"));
+		Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+			recorder.stop();   // no GPU state; safe off the render thread
+			bridge().stop();
+		}, "ocl-shutdown"));
 
 		OpenCrafterLink.LOGGER.info("[open-crafter-link] client initialized");
 	}

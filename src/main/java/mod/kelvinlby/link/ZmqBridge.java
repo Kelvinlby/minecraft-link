@@ -1,6 +1,7 @@
 package mod.kelvinlby.link;
 
 import mod.kelvinlby.OpenCrafterLink;
+import mod.kelvinlby.recorder.VisionTap;
 import org.zeromq.SocketType;
 import org.zeromq.ZContext;
 import org.zeromq.ZMQ;
@@ -188,7 +189,9 @@ public final class ZmqBridge implements LinkBridge {
 					LockSupport.parkNanos(2_000_000L); // ~2ms; nothing fresh to convert
 					continue;
 				}
-				visionOutbox.set(convert(raw));
+				VisionFrame frame = convert(raw);
+				VisionTap.publish(frame); // no-op unless a recording session is active
+				visionOutbox.set(frame);
 				LockSupport.unpark(visionSenderThread);
 			}
 		} catch (Throwable t) {

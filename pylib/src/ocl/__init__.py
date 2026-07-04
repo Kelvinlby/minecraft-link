@@ -55,7 +55,7 @@ import socket
 import struct
 import time
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Iterator, Optional, Sequence
 
 # pyzmq is only needed for the TCP transport; imported lazily so UDS-only use has no dependency.
 try:
@@ -75,6 +75,8 @@ __all__ = [
     "decode_vision",
     "encode_instruction",
     "frame_to_png",
+    "read_depth_zip",
+    "depth_zip_to_blocks",
     "frame_to_pointcloud",
     "save_ply",
     "angle_close",
@@ -697,6 +699,33 @@ def frame_to_png(frame: VisionFrame, rgb_path: str, depth_path: Optional[str] = 
     if depth_path:
         depth_bytes = bytes(max(0, min(255, int(d * 255 + 0.5))) for d in frame.depth)
         Image.frombytes("L", (w, h), depth_bytes).save(depth_path)
+
+
+def read_depth_zip(path: str) -> Iterator["np.ndarray"]:
+    """Yield each frame of a recorder ``depth.png.zip`` as a ``(height, width)`` uint16 array.
+
+    The recorder writes one 16-bit grayscale PNG per sample (``000000.png``, ``000001.png``, …),
+    each pixel = ``round(distance/far * 65535)`` where ``far`` is logged per sample in
+    ``actions.jsonl`` (and in ``manifest.json``). Use :func:`depth_zip_to_blocks` to convert a
+    yielded array to absolute distance in blocks. Requires pillow + numpy.
+    """
+    import zipfile
+    from PIL import Image
+    import numpy as np
+
+    with zipfile.ZipFile(path) as zf:
+        names = sorted(n for n in zf.namelist() if n.endswith(".png"))
+        for name in names:
+            with zf.open(name) as fp:
+                img = Image.open(fp)
+                yield np.asarray(img, dtype=np.uint16)
+
+
+def depth_zip_to_blocks(u16: "np.ndarray", far: float) -> "np.ndarray":
+    """Convert a uint16 depth frame (from :func:`read_depth_zip`) to absolute distance in blocks."""
+    import numpy as np
+
+    return u16.astype(np.float32) / 65535.0 * far
 
 
 def frame_to_pointcloud(frame: VisionFrame, depth_scale: float = 0.0):
