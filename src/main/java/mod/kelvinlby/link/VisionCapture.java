@@ -15,6 +15,7 @@ import net.minecraft.client.texture.GlTexture;
 
 import java.nio.ByteBuffer;
 import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 
 /**
  * Real RGBD vision: reads the main framebuffer's colour + depth attachments on the render thread, at
@@ -39,7 +40,8 @@ public final class VisionCapture {
 	/** Eye-space near plane (blocks); GameRenderer's near plane is fixed at 0.05. */
 	private static final float NEAR = 0.05f;
 
-	private final LinkBridge bridge;
+	/** Resolved live each frame so a bridge swap (settings save -&gt; reloadLink) doesn't orphan capture. */
+	private final Supplier<LinkBridge> bridge;
 	private final IntSupplier targetWSupplier;
 	private final IntSupplier targetHSupplier;
 	private final long minIntervalNs;
@@ -82,7 +84,7 @@ public final class VisionCapture {
 	 *                the in-game camera setting take effect without restarting
 	 * @param targetH supplies the downsample target height in pixels (read live, as above)
 	 */
-	public VisionCapture(LinkBridge bridge, IntSupplier targetW, IntSupplier targetH, int maxHz, boolean boxFilter) {
+	public VisionCapture(Supplier<LinkBridge> bridge, IntSupplier targetW, IntSupplier targetH, int maxHz, boolean boxFilter) {
 		this.bridge = bridge;
 		this.targetWSupplier = targetW;
 		this.targetHSupplier = targetH;
@@ -204,7 +206,7 @@ public final class VisionCapture {
 				depth = downsampleDepth(dv.data(), slot.srcW, slot.srcH);
 			}
 			slot.pending = false; // free immediately for reuse
-			bridge.enqueueVisionRaw(targetW, targetH, NEAR, slot.far, rgba, depth);
+			bridge.get().enqueueVisionRaw(targetW, targetH, NEAR, slot.far, rgba, depth);
 		}
 	}
 

@@ -6,7 +6,7 @@ running Minecraft client with the mod loaded. Installed as the ``ocl`` console
 script; also runnable with ``python -m ocl``.
 
     ocl telemetry                 # live player state
-    ocl vision --dump-dir frames  # RGBD stream (needs -Docl.vision=true)
+    ocl vision --dump-dir frames  # RGBD stream
     ocl drive --forward --sprint --hold 2
     ocl drive --look 90 0
     ocl pointcloud                # live 3D RGBD view
@@ -68,7 +68,7 @@ def _cmd_vision(link: Ocl, args):
         while deadline is None or time.monotonic() < deadline:
             f = link.read_vision(timeout=1.0)
             if f is None:
-                print("\n[vision] no frame in 1s — launched with -Docl.vision=true and in a world?")
+                print("\n[vision] no frame in 1s — is the mod running and in a world?")
                 continue
             count += 1
             now = time.monotonic()
@@ -206,7 +206,7 @@ def _cmd_all(link: Ocl, args):
     print(f"[all] telemetry: {n_tel} msgs ({n_tel/args.seconds:.1f} Hz) | "
           f"vision: {n_vis} frames ({n_vis/args.seconds:.1f} Hz)")
     if n_vis == 0:
-        print("[all] NOTE: no vision frames — launch the client with -Docl.vision=true")
+        print("[all] NOTE: no vision frames — is the mod running and in a world?")
     return 0 if n_tel > 0 else 1
 
 
@@ -240,7 +240,7 @@ def _cmd_all_uds(link: Ocl, args):
     print(f"[all] telemetry: {n_tel} msgs ({n_tel/args.seconds:.1f} Hz) | "
           f"vision: {n_vis} frames ({n_vis/args.seconds:.1f} Hz)")
     if n_vis == 0:
-        print("[all] NOTE: no vision frames — launch the client with -Docl.vision=true")
+        print("[all] NOTE: no vision frames — is the mod running and in a world?")
     return 0 if n_tel > 0 else 1
 
 

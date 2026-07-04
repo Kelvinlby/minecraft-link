@@ -14,7 +14,7 @@ telemetry, read the RGBD vision stream, and drive the player.
         link.look(yaw=90, pitch=0)                # absolute rotation
         link.set_slot(3)                          # select hotbar slot
 
-        f = link.read_vision()                    # newest RGBD frame (needs -Docl.vision=true)
+        f = link.read_vision()                    # newest RGBD frame
         print(f.w, f.h, f.center_depth_blocks())
 
 The default UDS transport needs no third-party dependencies. `pyzmq` is only needed for the
@@ -64,7 +64,7 @@ except ImportError:  # pragma: no cover
     zmq = None
 
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = [
     "Ocl",
@@ -307,28 +307,38 @@ def encode_instruction(
 # --------------------------------------------------------------------------- #
 # UDS transport helpers                                                        #
 # --------------------------------------------------------------------------- #
-def _read_exactly(conn: socket.socket, n: int) -> Optional[bytes]:
-    """Read exactly n bytes from a blocking/selected socket; None on clean EOF."""
+def _read_exactly(conn: socket.socket, sel: "selectors.BaseSelector", n: int) -> Optional[bytes]:
+    """Read exactly n bytes, waiting for the rest of the frame if it hasn't all arrived yet.
+
+    The socket is non-blocking, so a large frame (e.g. a multi-MB RGBD frame that spans several
+    kernel buffers) is usually only partially available on the first read. Rather than fail, we
+    ``select`` for more data between reads and keep going until we have the whole ``n`` bytes.
+    Returns None only on a clean EOF (peer closed mid-frame).
+    """
     chunks = []
     got = 0
     while got < n:
-        chunk = conn.recv(n - got)
+        try:
+            chunk = conn.recv(n - got)
+        except BlockingIOError:
+            sel.select()  # wait (blocking) for the next slice of this frame
+            continue
         if not chunk:
-            return None
+            return None  # peer closed
         chunks.append(chunk)
         got += len(chunk)
     return b"".join(chunks)
 
 
-def _read_frame(conn: socket.socket) -> Optional[bytes]:
-    """Read one `u32-LE length + payload` frame; None on EOF."""
-    head = _read_exactly(conn, 4)
+def _read_frame(conn: socket.socket, sel: "selectors.BaseSelector") -> Optional[bytes]:
+    """Read one `u32-LE length + payload` frame to completion; None on EOF."""
+    head = _read_exactly(conn, sel, 4)
     if head is None:
         return None
     (length,) = _LEN.unpack(head)
     if length > _MAX_FRAME:
         raise ValueError(f"framing desync: implausible length {length}")
-    return _read_exactly(conn, length)
+    return _read_exactly(conn, sel, length)
 
 
 def _write_frame(conn: socket.socket, payload: bytes) -> None:
@@ -369,17 +379,21 @@ class _UdsReader:
         if conn is None:
             return None
         # Drain everything currently readable, keep only the newest frame (conflate).
+        # We block (up to the deadline) for the *first* frame, then peek non-blocking for any
+        # already-buffered newer frames. Each frame, once it starts arriving, is read to
+        # completion (see `_read_exactly`) so a large multi-buffer frame is never truncated.
         newest = None
-        first = True
         while True:
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            # After we have one frame, don't block for more — just grab what's already buffered.
-            wait = remaining if (first and newest is None) else 0.0
-            if not self._sel.select(wait):
-                break
-            first = False
+            if newest is None:
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                if not self._sel.select(remaining):
+                    break  # nothing within the timeout
+            else:
+                # Already have a frame; is another whole one waiting? Peek without blocking.
+                if not self._sel.select(0.0):
+                    break
             try:
-                frame = _read_frame(conn)
+                frame = _read_frame(conn, self._sel)
             except (OSError, ValueError):
                 frame = None
             if frame is None:  # peer closed — drop and let the next recv reconnect
@@ -559,7 +573,7 @@ class Ocl:
     def read_vision(self, timeout: float = 1.0) -> Optional[VisionFrame]:
         """Return the newest RGBD frame, or None within `timeout`.
 
-        Requires the client to be launched with -Docl.vision=true and to be in a world.
+        Requires the client to be in a world (vision only flows while a world renders).
         """
         buf = self._recv(self._vision_socket(), timeout)
         return decode_vision(buf) if buf is not None else None

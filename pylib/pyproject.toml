@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "open-crafter-link"
-version = "1.0.0"
+version = "1.0.1"
 description = "Python client library and CLI for the Open Crafter Link Minecraft mod: read player telemetry, read the RGBD vision stream, and drive the player."
 readme = "README.md"
 requires-python = ">=3.9"

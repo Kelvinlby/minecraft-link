@@ -37,7 +37,7 @@ with Ocl() as link:                       # endpoints default to LinkConfig's
     link.drive(forward=True, sprint=True)     # one instruction
     link.hold(2.0, forward=True)              # *hold* a movement (republish each tick)
 
-    f = link.read_vision()                    # newest RGBD frame (-Docl.vision=true)
+    f = link.read_vision()                    # newest RGBD frame
     if f:
         print(f.w, f.h, f.center_depth_blocks())
         rgb, depth = f.to_numpy()             # (h,w,3) and (h,w) float32 (needs numpy)
@@ -87,11 +87,11 @@ host so both sides meet on the same files. The mod's directory can be overridden
 Installing the package puts an `ocl` command on your `PATH` (equivalently,
 `python -m ocl`).
 
-Run the game with vision enabled (and, if you want, custom resolution/rate):
+Vision is always on — no launch flag needed. To pin a custom resolution/rate, optionally set:
 
 ```
--Docl.vision=true
 # optional: -Docl.visionWidth=128 -Docl.visionHeight=128 -Docl.visionMaxHz=40
+#   (otherwise the resolution comes from the in-game settings screen)
 ```
 
 Join a world (telemetry and vision only flow while a world is rendering), then:

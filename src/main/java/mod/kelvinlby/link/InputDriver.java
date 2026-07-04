@@ -6,6 +6,8 @@ import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.util.math.MathHelper;
 
+import java.util.function.Supplier;
+
 /**
  * Drives the player by simulating keypresses on the real {@link KeyBinding} objects, run on
  * {@code START_CLIENT_TICK} — at the HEAD of {@code MinecraftClient.tick()}, before
@@ -32,12 +34,13 @@ import net.minecraft.util.math.MathHelper;
  * telemetry is published separately at end-of-tick by {@link TickDriver}.
  */
 public final class InputDriver {
-	private final LinkBridge bridge;
+	/** Resolved live each tick so a bridge swap (settings save -&gt; reloadLink) doesn't orphan input. */
+	private final Supplier<LinkBridge> bridge;
 
 	/** Whether the mod is currently holding any driven key, so it can release them once on silence. */
 	private boolean owningKeys;
 
-	public InputDriver(LinkBridge bridge) {
+	public InputDriver(Supplier<LinkBridge> bridge) {
 		this.bridge = bridge;
 	}
 
@@ -48,7 +51,7 @@ public final class InputDriver {
 			return;
 		}
 
-		InboundInstruction in = bridge.takeLatest();
+		InboundInstruction in = bridge.get().takeLatest();
 		if (in == null) {
 			// No fresh instruction: release once if we were driving, then go hands-off so a human can play.
 			if (owningKeys) {

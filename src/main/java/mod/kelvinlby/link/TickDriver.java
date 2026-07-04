@@ -3,6 +3,8 @@ package mod.kelvinlby.link;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 
+import java.util.function.Supplier;
+
 /**
  * Outbound half of the per-tick loop, run on {@code END_CLIENT_TICK}. It publishes a fresh telemetry
  * snapshot at the end of each tick so the snapshot reflects post-physics state. All inbound control
@@ -12,9 +14,10 @@ import net.minecraft.client.network.ClientPlayerEntity;
  * <p>All work here is lightweight; link I/O and encoding happen on the bridge's worker threads.
  */
 public final class TickDriver {
-	private final LinkBridge bridge;
+	/** Resolved live each tick so a bridge swap (settings save -&gt; reloadLink) doesn't orphan telemetry. */
+	private final Supplier<LinkBridge> bridge;
 
-	public TickDriver(LinkBridge bridge) {
+	public TickDriver(Supplier<LinkBridge> bridge) {
 		this.bridge = bridge;
 	}
 
@@ -23,7 +26,7 @@ public final class TickDriver {
 		if (player == null || mc.world == null) {
 			return; // not in a world; nothing to report
 		}
-		bridge.publish(buildSnapshot(player));
+		bridge.get().publish(buildSnapshot(player));
 	}
 
 	private OutboundSnapshot buildSnapshot(ClientPlayerEntity player) {
