@@ -16,8 +16,8 @@ package mod.kelvinlby.recorder;
  * @param left        strafe-left key held (A)
  * @param right       strafe-right key held (D)
  * @param jump        jump key held
- * @param sprint      sprint key held
- * @param sneak       sneak key held
+ * @param sprint      effective sprinting state (player is actually sprinting, not just key held)
+ * @param sneak       effective sneaking state (player is actually sneaking/crouched, not just key held)
  * @param attack      attack / left-click held
  * @param interact    use / right-click held
  * @param selectedSlot main-hand hotbar slot (0..8)
