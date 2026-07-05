@@ -14,9 +14,15 @@ import java.util.concurrent.atomic.AtomicReference;
  * doing.
  *
  * <p>Reading the raw {@code pressed} field (access-widened, same as the driver relies on) captures the
- * true held state of sneak/sprint/attack/use regardless of the user's sticky-toggle option — exactly
+ * true held state of attack/use regardless of the user's sticky-toggle option — exactly
  * the state vanilla physics acts on this tick. Rotation and hotbar slot come from the same accessors
  * {@code TickDriver.buildSnapshot} uses.
+	 *
+	 * <p><b>Sprint and sneak are read from the player's effective movement state</b>
+	 * ({@link ClientPlayerEntity#isSprinting()} / {@link ClientPlayerEntity#isSneaking()}) rather than
+	 * their key bindings. The key only expresses intent; vanilla gates actual sprinting on hunger,
+	 * forward motion, collisions, etc., and sneak reflects the crouch pose. Recording the effective flag
+	 * captures what the player is really doing this tick.
  *
  * <p>Must run on the client thread ({@code KeyBinding.pressed} and player state are only safe there).
  * The latest {@link ActionSet} is published into a single-slot holder that the recorder's
@@ -48,8 +54,8 @@ public final class ActionReader {
 				opts.leftKey.pressed,
 				opts.rightKey.pressed,
 				opts.jumpKey.pressed,
-				opts.sprintKey.pressed,
-				opts.sneakKey.pressed,
+				player.isSprinting(),
+				player.isSneaking(),
 				opts.attackKey.pressed,
 				opts.useKey.pressed,
 				player.getInventory().getSelectedSlot(),
