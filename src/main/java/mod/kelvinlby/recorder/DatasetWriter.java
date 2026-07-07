@@ -76,6 +76,11 @@ public final class DatasetWriter {
 		this.startEpochMs = System.currentTimeMillis();
 	}
 
+	/** The session folder name (its timestamp), e.g. for the save toast. */
+	public String sessionName() {
+		return dir.getFileName().toString();
+	}
+
 	/** Create the session directory and open the output streams. Call once before {@link #write}. */
 	public void open() throws IOException {
 		Files.createDirectories(dir);
@@ -173,17 +178,25 @@ public final class DatasetWriter {
 	 * @param samples  total samples written
 	 * @param dropped  samples the sampler dropped because the writer queue was full
 	 * @param repeated samples whose frame was a repeat of the previous one
+	 * @return null when everything closed cleanly, else the first failure (short, human-readable) —
+	 *         surfaced to the player in the save toast
 	 */
-	public void close(long samples, long dropped, long repeated) {
+	public String close(long samples, long dropped, long repeated) {
+		String error = null;
 		if (rgbEncoder != null) {
-			rgbEncoder.close(); // EOF on stdin makes ffmpeg finalize the MP4
+			error = rgbEncoder.close(); // EOF on stdin makes ffmpeg finalize the MP4
 		}
-		closeQuietly(depthZip, "depth.png.zip");
-		closeQuietly(actionsOut, "actions.jsonl");
-		writeManifest(samples, dropped, repeated);
+		error = firstError(error, closeQuietly(depthZip, "depth.png.zip"));
+		error = firstError(error, closeQuietly(actionsOut, "actions.jsonl"));
+		error = firstError(error, writeManifest(samples, dropped, repeated));
+		return error;
 	}
 
-	private void writeManifest(long samples, long dropped, long repeated) {
+	private static String firstError(String current, String next) {
+		return current != null ? current : next;
+	}
+
+	private String writeManifest(long samples, long dropped, long repeated) {
 		boolean hasVideo = rgbEncoder != null;
 		String codec = (video.codec() == FfmpegEncoder.Codec.H265) ? "hevc" : "h264";
 		String json = "{\n"
@@ -204,8 +217,10 @@ public final class DatasetWriter {
 				+ "}\n";
 		try {
 			Files.writeString(dir.resolve("manifest.json"), json, StandardCharsets.UTF_8);
+			return null;
 		} catch (IOException e) {
 			OpenCrafterLink.LOGGER.error("[open-crafter-link] failed to write manifest.json", e);
+			return "failed to write manifest.json: " + e.getMessage();
 		}
 	}
 
@@ -222,14 +237,16 @@ public final class DatasetWriter {
 		return Float.toString(f);
 	}
 
-	private static void closeQuietly(java.io.Closeable c, String what) {
+	private static String closeQuietly(java.io.Closeable c, String what) {
 		if (c == null) {
-			return;
+			return null;
 		}
 		try {
 			c.close();
+			return null;
 		} catch (IOException e) {
 			OpenCrafterLink.LOGGER.error("[open-crafter-link] failed to close {}", what, e);
+			return "failed to close " + what + ": " + e.getMessage();
 		}
 	}
 }

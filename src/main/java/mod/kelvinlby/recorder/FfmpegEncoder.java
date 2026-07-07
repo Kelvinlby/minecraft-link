@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit;
  * directory. If the process dies mid-session, {@link #writeFrame} reports it once and becomes a
  * no-op — the recorder keeps writing depth + actions.
  */
-public final class FfmpegEncoder implements AutoCloseable {
+public final class FfmpegEncoder {
 
 	/** Which encoder family to use. {@code AUTO} tries GPU first, then CPU. */
 	public enum Backend { AUTO, GPU, CPU }
@@ -321,9 +321,12 @@ public final class FfmpegEncoder implements AutoCloseable {
 		}
 	}
 
-	/** Close stdin (ffmpeg finalizes the MP4 on EOF) and wait for the process to exit. */
-	@Override
-	public void close() {
+	/**
+	 * Close stdin (ffmpeg finalizes the MP4 on EOF) and wait for the process to exit.
+	 *
+	 * @return null on a clean exit, else a short description of what went wrong (also logged)
+	 */
+	public String close() {
 		try {
 			stdin.close();
 		} catch (IOException ignored) {
@@ -333,13 +336,21 @@ public final class FfmpegEncoder implements AutoCloseable {
 			if (!process.waitFor(10, TimeUnit.SECONDS)) {
 				OpenCrafterLink.LOGGER.warn("[open-crafter-link] ffmpeg did not exit within 10s; killing it");
 				process.destroyForcibly();
-			} else if (process.exitValue() != 0 && !dead) {
+				return "ffmpeg hung and was killed — rgb.mp4 may be truncated";
+			}
+			if (dead) {
+				return "ffmpeg died mid-session — rgb.mp4 is truncated (see ffmpeg.log)";
+			}
+			if (process.exitValue() != 0) {
 				OpenCrafterLink.LOGGER.warn("[open-crafter-link] ffmpeg exited with code {} (see ffmpeg.log)",
 						process.exitValue());
+				return "ffmpeg exited with code " + process.exitValue() + " (see ffmpeg.log)";
 			}
+			return null;
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 			process.destroyForcibly();
+			return "interrupted while waiting for ffmpeg";
 		}
 	}
 }

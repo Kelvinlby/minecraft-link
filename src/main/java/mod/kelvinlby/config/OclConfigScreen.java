@@ -121,10 +121,12 @@ public final class OclConfigScreen {
 						.name(Text.literal("Record dataset"))
 						.description(OptionDescription.of(Text.literal(
 								"Capture aligned RGBD frames + player actions to a dataset under "
-										+ "<gameDir>/open-crafter-link/<timestamp>/. Toggling this starts a fresh "
-										+ "session (on enable) or finalizes the current one (on disable) when you "
-										+ "save. Frames are recorded at the camera resolution set on the Sensors "
-										+ "tab.")))
+										+ "<gameDir>/open-crafter-link/<timestamp>/. While enabled, every world you "
+										+ "enter (single-player or multiplayer) is recorded to its own session, "
+										+ "finalized when you leave the world — menus and the title screen are never "
+										+ "recorded. A toast shows the save progress on world exit. Toggling this "
+										+ "while in a world starts/stops a session when you save. Frames are recorded "
+										+ "at the camera resolution set on the Sensors tab.")))
 						.binding(defaults.recordDataset, () -> cfg.recordDataset, v -> cfg.recordDataset = v)
 						.controller(TickBoxControllerBuilder::create)
 						.build())

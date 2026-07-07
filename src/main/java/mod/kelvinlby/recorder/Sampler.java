@@ -58,6 +58,11 @@ public final class Sampler {
 		this.writer = writer;
 	}
 
+	/** The session folder name (its timestamp), for the save toast. */
+	public String sessionName() {
+		return writer.sessionName();
+	}
+
 	/** Open the writer and start the clock + writer threads. */
 	public void start() throws java.io.IOException {
 		writer.open();
@@ -71,23 +76,54 @@ public final class Sampler {
 		clockThread.start();
 	}
 
-	/** Stop the clock, drain remaining queued samples, and finalize the dataset files. Idempotent. */
-	public void stop() {
+	/** Save-progress observer for {@link #stop}; called from the thread running the stop. */
+	public interface ProgressListener {
+		/**
+		 * @param remainingSamples samples still queued for the writer
+		 * @param finalizingVideo  true once the queue is drained and the video encoder is finalizing
+		 */
+		void onProgress(int remainingSamples, boolean finalizingVideo);
+	}
+
+	/**
+	 * Stop the clock, drain <b>every</b> queued sample, and finalize the dataset files. Blocks until
+	 * the data is fully on disk — run it off the game threads (see {@code Recorder.stopAsync}) unless
+	 * the game is shutting down. The writer is waited for without a cap: an earlier version gave up
+	 * after 2 s and closed the files while the writer thread was still writing them. Idempotent
+	 * (subsequent calls return null).
+	 *
+	 * @param listener optional save-progress observer (drain countdown, then video finalize)
+	 * @return the session's outcome, or null if this sampler was already stopped
+	 */
+	public synchronized SaveResult stop(ProgressListener listener) {
 		if (!running) {
-			return;
+			return null;
 		}
 		running = false;
 
-		joinQuietly(clockThread);   // no more samples produced after this returns
-		// Poison the writer so it drains what's queued then exits.
-		queue.offer(POISON);
-		joinQuietly(writerThread);
+		LockSupport.unpark(clockThread); // cut the current park short instead of waiting out a period
+		joinQuietly(clockThread, 2000);  // no more samples produced after this returns
+		// Poison the writer so it drains what's queued then exits. The queue can be momentarily full;
+		// keep offering while the writer makes room. (If the writer died, its liveness check ends this.)
+		while (!queue.offer(POISON) && writerThread.isAlive()) {
+			joinQuietly(writerThread, 50);
+		}
+		while (writerThread.isAlive()) {
+			if (listener != null) {
+				listener.onProgress(queue.size(), false);
+			}
+			joinQuietly(writerThread, 100);
+		}
 		clockThread = null;
 		writerThread = null;
 
-		writer.close(written.get(), dropped.get(), repeated.get());
+		if (listener != null) {
+			listener.onProgress(0, true);
+		}
+		String error = writer.close(written.get(), dropped.get(), repeated.get());
 		OpenCrafterLink.LOGGER.info("[open-crafter-link] recording stopped: {} samples ({} dropped, {} repeated)",
 				written.get(), dropped.get(), repeated.get());
+		return new SaveResult(written.get(), dropped.get(), repeated.get(), error);
 	}
 
 	/** Fixed-deadline clock: latch one aligned sample per period, pack it, and enqueue (dropping if full). */
@@ -182,17 +218,17 @@ public final class Sampler {
 		}
 	}
 
-	private static void joinQuietly(Thread t) {
+	private static void joinQuietly(Thread t, long millis) {
 		if (t == null) {
 			return;
 		}
 		try {
-			t.join(2000);
+			t.join(millis);
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 		}
 	}
 
-	/** Sentinel enqueued by {@link #stop()} to make the writer drain-and-exit. */
+	/** Sentinel enqueued by {@link #stop} to make the writer drain-and-exit. */
 	private static final Sample POISON = new Sample(-1, -1, null, null, false);
 }
