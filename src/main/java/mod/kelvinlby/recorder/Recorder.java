@@ -20,8 +20,8 @@ import java.time.format.DateTimeFormatter;
  * nobody is recording.
  *
  * <p>Wiring: the client registers {@link #actionReader()} on a client-tick event and calls
- * {@link #syncTo(boolean, int)} at init and after each settings save so toggling the "Record dataset"
- * option starts/stops a session live.
+ * {@link #syncTo} at init and after each settings save so toggling the "Record dataset" option
+ * starts/stops a session live.
  */
 public final class Recorder {
 
@@ -44,22 +44,23 @@ public final class Recorder {
 	/**
 	 * Reconcile the running state to the config: start a fresh session if recording is enabled and not
 	 * already running, stop the current one if disabled. Called at init and after a settings save.
+	 * {@code video} is the config's ffmpeg encoding settings, snapshotted for the session.
 	 */
-	public synchronized void syncTo(boolean enabled, int sampleHz) {
+	public synchronized void syncTo(boolean enabled, int sampleHz, FfmpegEncoder.Settings video) {
 		if (enabled && !running) {
-			start(sampleHz);
+			start(sampleHz, video);
 		} else if (!enabled && running) {
 			stop();
 		}
 	}
 
 	/** Begin a new recording session at {@code sampleHz}. No-op if already running. */
-	public synchronized void start(int sampleHz) {
+	public synchronized void start(int sampleHz, FfmpegEncoder.Settings video) {
 		if (running) {
 			return;
 		}
 		Path dir = sessionDir();
-		DatasetWriter writer = new DatasetWriter(dir, sampleHz);
+		DatasetWriter writer = new DatasetWriter(dir, sampleHz, video);
 		Sampler s = new Sampler(sampleHz, actionReader, writer);
 		VisionTap.setActive(true); // bridges start publishing converted frames
 		try {

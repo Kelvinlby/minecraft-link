@@ -1,8 +1,6 @@
 package mod.kelvinlby.recorder;
 
 import mod.kelvinlby.OpenCrafterLink;
-import mod.kelvinlby.link.VisionFrame;
-import org.jcodec.api.awt.AWTSequenceEncoder;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -21,35 +19,42 @@ import java.util.zip.ZipOutputStream;
 /**
  * Owns one recording session's on-disk output and writes each {@link Sample} to it. Called only from
  * the recorder's single writer thread (see {@link Recorder}), so no field here is touched concurrently
- * and the heavy H.264 encode runs off the sampler's clock.
+ * and the encoding runs off the sampler's clock.
  *
  * <p>Layout under {@code <gameDir>/open-crafter-link/<session>/}:
  * <ul>
- *   <li>{@code rgb.mp4} — H.264 (JCodec), one frame per sample, fps = the recorder's sample rate.
- *       RGB comes from {@link VisionFrame#rgb()} (float 0..1, top-left origin).</li>
+ *   <li>{@code rgb.mp4} — H.264/H.265 encoded by a piped system {@code ffmpeg} (GPU when available;
+ *       see {@link FfmpegEncoder}), one frame per sample, fps = the recorder's sample rate. The MP4
+ *       is fragmented, so it survives a crash mid-session. When no usable ffmpeg exists the session
+ *       records without video (the settings screen warns about this up front); {@code ffmpeg.log}
+ *       holds the encoder's stderr.</li>
  *   <li>{@code depth.png.zip} — a ZIP holding one 16-bit grayscale PNG per sample, named
  *       {@code 000000.png}, {@code 000001.png}, … in sample order. Each pixel is the frame's
  *       normalized depth ({@code distance/far}, 0..1) quantized to uint16 via
- *       {@code round(clamp(depth,0,1) * 65535)}; recover absolute blocks as {@code value/65535*far}.
- *       PNG's per-scanline filtering compresses the smooth depth image far better than raw float32,
- *       and 16 bits (≈ far/65536 resolution) is effectively lossless for the render. The manifest and
- *       each {@code actions.jsonl} line record width/height and near/far.</li>
+ *       {@code round(clamp(depth,0,1) * 65535)} (the quantization happens at packing time — see
+ *       {@link PackedFrame}); recover absolute blocks as {@code value/65535*far}. PNG's per-scanline
+ *       filtering compresses the smooth depth image far better than raw float32, and 16 bits
+ *       (≈ far/65536 resolution) is effectively lossless for the render. The manifest and each
+ *       {@code actions.jsonl} line record width/height and near/far.</li>
  *   <li>{@code actions.jsonl} — one JSON object per line per sample: seqno, timestamp, every action
  *       field, the frame's near/far (so absolute depth is recoverable), and {@code frameRepeated}.</li>
  *   <li>{@code manifest.json} — session metadata + final counts, written on {@link #close(long, long, long)}.</li>
  * </ul>
  *
- * <p>The first sample fixes the frame dimensions; subsequent frames of a different size (a resolution
- * change mid-session) are skipped for video/depth but still logged, keeping the streams rectangular.
- * H.264 requires even dimensions, so odd width/height are padded by one pixel in the video only.
+ * <p>The first sample fixes the frame dimensions (and spawns the video encoder); subsequent frames of
+ * a different size (a resolution change mid-session) are skipped for video/depth but still logged,
+ * keeping the streams rectangular. Odd dimensions are padded to even inside ffmpeg (H.264/5 require it).
  */
 public final class DatasetWriter {
 
 	private final Path dir;
 	private final int fps;
+	private final FfmpegEncoder.Settings video;
 	private final long startEpochMs;
 
-	private AWTSequenceEncoder rgbEncoder;
+	private FfmpegEncoder rgbEncoder;
+	/** Set once the first frame decided the video question, so we only attempt the spawn once. */
+	private boolean videoDecided;
 	private ZipOutputStream depthZip; // one 16-bit grayscale PNG per sample
 	private Writer actionsOut;        // actions.jsonl
 
@@ -60,24 +65,20 @@ public final class DatasetWriter {
 	private int width = -1;
 	private int height = -1;
 
-	/** Reused per-frame scratch so we don't reallocate the BufferedImage/arrays every sample. */
-	private BufferedImage frameImage;
-	private int[] pixelScratch;
-
 	/** 16-bit grayscale image reused for depth PNG encoding, plus a direct handle to its backing array. */
 	private BufferedImage depthImage;
 	private short[] depthPixels;
 
-	public DatasetWriter(Path dir, int fps) {
+	public DatasetWriter(Path dir, int fps, FfmpegEncoder.Settings video) {
 		this.dir = dir;
 		this.fps = Math.max(1, fps);
+		this.video = video;
 		this.startEpochMs = System.currentTimeMillis();
 	}
 
-	/** Create the session directory and open the three output streams. Call once before {@link #write}. */
+	/** Create the session directory and open the output streams. Call once before {@link #write}. */
 	public void open() throws IOException {
 		Files.createDirectories(dir);
-		rgbEncoder = AWTSequenceEncoder.createSequenceEncoder(dir.resolve("rgb.mp4").toFile(), fps);
 		// PNG is already DEFLATE-compressed internally, so store entries uncompressed (STORED) rather
 		// than paying a second, futile DEFLATE pass over them.
 		depthZip = new ZipOutputStream(
@@ -89,46 +90,37 @@ public final class DatasetWriter {
 
 	/** Append one aligned sample. Video + depth are written only when the frame matches the fixed size. */
 	public void write(Sample s) throws IOException {
-		VisionFrame v = s.vision();
+		PackedFrame v = s.vision();
 		if (width < 0) {
 			width = v.width();
 			height = v.height();
 			allocScratch();
 		}
+		if (!videoDecided) {
+			videoDecided = true;
+			// Spawned here — on the writer thread, dimensions now known — so the binary/encoder probes
+			// never stall the sampler clock or the game threads. Null (no ffmpeg / no usable encoder)
+			// has already been logged and leaves a video-less session.
+			rgbEncoder = FfmpegEncoder.open(dir.resolve("rgb.mp4"), dir.resolve("ffmpeg.log"),
+					width, height, fps, video);
+		}
 		boolean sizeOk = v.width() == width && v.height() == height;
 		if (sizeOk) {
-			encodeRgb(v);
+			if (rgbEncoder != null) {
+				rgbEncoder.writeFrame(v.rgb24());
+			}
 			writeDepth(v);
 		}
 		writeActionLine(s, sizeOk);
 	}
 
-	private void encodeRgb(VisionFrame v) throws IOException {
-		float[] rgb = v.rgb();
-		int[] px = pixelScratch;
-		for (int i = 0, p = 0; i < px.length; i++, p += 3) {
-			int r = clamp8(rgb[p]);
-			int g = clamp8(rgb[p + 1]);
-			int b = clamp8(rgb[p + 2]);
-			px[i] = (r << 16) | (g << 8) | b;
-		}
-		frameImage.setRGB(0, 0, width, height, px, 0, width);
-		rgbEncoder.encodeImage(frameImage);
-	}
-
 	/**
-	 * Quantize the frame's normalized depth to uint16 and append it as a 16-bit grayscale PNG entry to
-	 * {@code depth.png.zip}. Entries are {@code STORED} (PNG carries its own DEFLATE), so we encode the
-	 * PNG into memory first to know its size + CRC before opening the ZIP entry.
+	 * Append the frame's uint16 depth as a 16-bit grayscale PNG entry to {@code depth.png.zip}.
+	 * Entries are {@code STORED} (PNG carries its own DEFLATE), so we encode the PNG into memory
+	 * first to know its size + CRC before opening the ZIP entry.
 	 */
-	private void writeDepth(VisionFrame v) throws IOException {
-		float[] depth = v.depth();
-		short[] px = depthPixels;
-		for (int i = 0; i < px.length; i++) {
-			float d = depth[i];
-			d = d < 0.0f ? 0.0f : Math.min(d, 1.0f);
-			px[i] = (short) Math.round(d * 65535.0f); // stored as unsigned 16-bit gray
-		}
+	private void writeDepth(PackedFrame v) throws IOException {
+		System.arraycopy(v.depth16(), 0, depthPixels, 0, depthPixels.length);
 		ByteArrayOutputStream pngBytes = new ByteArrayOutputStream(width * height * 2);
 		ImageIO.write(depthImage, "png", pngBytes);
 		byte[] png = pngBytes.toByteArray();
@@ -147,7 +139,7 @@ public final class DatasetWriter {
 
 	private void writeActionLine(Sample s, boolean sizeOk) throws IOException {
 		ActionSet a = s.action();
-		VisionFrame v = s.vision();
+		PackedFrame v = s.vision();
 		// Compact hand-built JSON — no dependency needed and the fields are all scalar.
 		StringBuilder sb = new StringBuilder(256);
 		sb.append('{')
@@ -183,12 +175,8 @@ public final class DatasetWriter {
 	 * @param repeated samples whose frame was a repeat of the previous one
 	 */
 	public void close(long samples, long dropped, long repeated) {
-		try {
-			if (rgbEncoder != null) {
-				rgbEncoder.finish(); // flushes the moov atom — the mp4 is unplayable without this
-			}
-		} catch (IOException | RuntimeException e) {
-			OpenCrafterLink.LOGGER.error("[open-crafter-link] failed to finalize rgb.mp4", e);
+		if (rgbEncoder != null) {
+			rgbEncoder.close(); // EOF on stdin makes ffmpeg finalize the MP4
 		}
 		closeQuietly(depthZip, "depth.png.zip");
 		closeQuietly(actionsOut, "actions.jsonl");
@@ -196,14 +184,17 @@ public final class DatasetWriter {
 	}
 
 	private void writeManifest(long samples, long dropped, long repeated) {
+		boolean hasVideo = rgbEncoder != null;
+		String codec = (video.codec() == FfmpegEncoder.Codec.H265) ? "hevc" : "h264";
 		String json = "{\n"
-				+ "  \"schema_version\": 2,\n"
+				+ "  \"schema_version\": 3,\n"
 				+ "  \"start_epoch_ms\": " + startEpochMs + ",\n"
 				+ "  \"sample_hz\": " + fps + ",\n"
 				+ "  \"width\": " + width + ",\n"
 				+ "  \"height\": " + height + ",\n"
-				+ "  \"rgb\": \"rgb.mp4\",\n"
-				+ "  \"rgb_codec\": \"h264\",\n"
+				+ "  \"rgb\": " + (hasVideo ? "\"rgb.mp4\"" : "null") + ",\n"
+				+ "  \"rgb_codec\": " + (hasVideo ? "\"" + codec + "\"" : "null") + ",\n"
+				+ "  \"rgb_encoder\": " + (hasVideo ? "\"" + rgbEncoder.encoderName() + "\"" : "null") + ",\n"
 				+ "  \"depth\": \"depth.png.zip\",\n"
 				+ "  \"depth_format\": \"zip of 16-bit grayscale PNG per frame (000000.png..), top-left origin, value = round(distance/far * 65535); recover blocks as value/65535*far\",\n"
 				+ "  \"actions\": \"actions.jsonl\",\n"
@@ -219,15 +210,8 @@ public final class DatasetWriter {
 	}
 
 	private void allocScratch() {
-		frameImage = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-		pixelScratch = new int[width * height];
 		depthImage = new BufferedImage(width, height, BufferedImage.TYPE_USHORT_GRAY);
 		depthPixels = ((DataBufferUShort) depthImage.getRaster().getDataBuffer()).getData();
-	}
-
-	private static int clamp8(float f) {
-		int v = Math.round(f * 255.0f);
-		return v < 0 ? 0 : (Math.min(v, 255));
 	}
 
 	/** Format a float compactly, mapping the non-finite sentinels to JSON null. */

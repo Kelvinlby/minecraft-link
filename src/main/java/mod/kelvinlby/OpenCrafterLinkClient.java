@@ -92,7 +92,7 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		// action read follows the driver's telemetry snapshot within the same END tick. syncTo starts a
 		// session now if "Record dataset" was left enabled in a previous run.
 		ClientTickEvents.END_CLIENT_TICK.register(recorder.actionReader()::onClientTick);
-		recorder.syncTo(cfg.recordDataset, cfg.recordSampleHz);
+		recorder.syncTo(cfg.recordDataset, cfg.recordSampleHz, cfg.toVideoSettings());
 
 		// Vision: capture the 3D world (incl. first-person hand) across two seams within a frame — depth at
 		// END_MAIN (where the main framebuffer's depth is written), colour at the first HUD element (after
@@ -113,7 +113,7 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		// Tear down on normal client stop. CLIENT_STOPPING runs on the render/main thread, so the GPU
 		// buffers can be freed here directly — before the bridge threads are joined.
 		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
-			recorder.stop();   // finalize any open session (flush rgb.mp4 moov + write manifest) before teardown
+			recorder.stop();   // finalize any open session (close the ffmpeg encoder + write manifest) before teardown
 			vision.dispose();
 			bridge().stop();
 		});

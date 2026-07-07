@@ -13,8 +13,9 @@ import java.util.concurrent.locks.LockSupport;
  * The recorder's fixed-rate clock. A dedicated daemon thread fires every {@code 1/hz} seconds, latches
  * the newest RGBD frame ({@link VisionTap#latest()}) together with the current action set
  * ({@link ActionReader#current()}) into one {@link Sample}, and hands it to a second writer thread via
- * a bounded queue. A separate writer thread does the H.264 encode + disk I/O so it never stalls the
- * clock.
+ * a bounded queue. A separate writer thread does the video encode + disk I/O so it never stalls the
+ * clock. Frames are packed to their storage precision ({@link PackedFrame}) on the clock thread, so a
+ * queued sample holds compact bytes, not raw floats.
  *
  * <h2>Why not reuse the streaming handoff</h2>
  * The link's vision path is conflating (drops frames under load), which is wrong for a recorder that
@@ -30,8 +31,13 @@ import java.util.concurrent.locks.LockSupport;
  */
 public final class Sampler {
 
-	/** Bounded so a stalled writer applies backpressure as drops, not unbounded memory growth. */
-	private static final int QUEUE_CAPACITY = 256;
+	/**
+	 * Bounded so a stalled writer applies backpressure as drops, not memory growth. Sized to absorb
+	 * scheduling jitter only — a deep queue would just pin megabytes of frames behind a writer that is
+	 * not keeping up anyway (a 256-deep queue of raw-float frames once pinned ~1.4 GB of heap and drove
+	 * the whole system into memory pressure; the drop counter surfaces overflow instead).
+	 */
+	private static final int QUEUE_CAPACITY = 16;
 
 	private final int hz;
 	private final ActionReader actions;
@@ -84,12 +90,13 @@ public final class Sampler {
 				written.get(), dropped.get(), repeated.get());
 	}
 
-	/** Fixed-deadline clock: latch one aligned sample per period and enqueue it (dropping if full). */
+	/** Fixed-deadline clock: latch one aligned sample per period, pack it, and enqueue (dropping if full). */
 	private void clockLoop() {
 		long periodNs = 1_000_000_000L / hz;
 		long seq = 0;
 		long next = System.nanoTime();
-		VisionFrame lastFrame = null;
+		VisionFrame lastRaw = null;
+		PackedFrame lastPacked = null;
 
 		while (running) {
 			next += periodNs;
@@ -99,14 +106,22 @@ public final class Sampler {
 			}
 
 			VisionFrame fresh = VisionTap.latest();
-			boolean repeat = fresh == null;
-			VisionFrame frame = repeat ? lastFrame : fresh;
+			// The tap conflates but never clears on read, so "fresh" is detected by identity: the same
+			// object as last tick means no new frame was converted since (menu/paused/low fps).
+			boolean repeat = fresh == null || fresh == lastRaw;
+			PackedFrame frame;
+			if (repeat) {
+				frame = lastPacked; // share the previous packed instance — no re-pack, no extra memory
+			} else {
+				frame = PackedFrame.of(fresh);
+				lastRaw = fresh;
+				lastPacked = frame;
+			}
 			if (frame == null) {
 				// No frame ever captured yet (e.g. still on the title screen) — nothing to record; the
 				// clock keeps ticking but we don't emit a sample until the first frame exists.
 				continue;
 			}
-			lastFrame = frame;
 
 			Sample sample = new Sample(seq++, System.nanoTime(), frame, actions.current(), repeat);
 			if (queue.offer(sample)) {

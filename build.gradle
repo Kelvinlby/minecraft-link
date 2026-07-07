@@ -35,11 +35,8 @@ dependencies {
 	// `implementation` puts it on the compile + dev-run classpath.
 	include implementation("org.zeromq:jeromq:0.6.0")
 
-	// JCodec — pure-Java H.264 encoder (no natives), for the dataset recorder's rgb.mp4 output.
-	// Bundled jar-in-jar exactly like JeroMQ so it rides Fabric's classloader at runtime. The
-	// `-javase` artifact adds the BufferedImage/AWT bridge used to feed frames into the encoder.
-	include implementation("org.jcodec:jcodec:0.2.5")
-	include implementation("org.jcodec:jcodec-javase:0.2.5")
+	// The dataset recorder's rgb.mp4 is encoded by a system-installed ffmpeg (piped rawvideo; see
+	// FfmpegEncoder) — no Java video dependency needed.
 
 	// Settings UI. Both are standalone mods the user installs separately, so `modImplementation`
 	// (not `include`) — bundling them via jar-in-jar would be wrong.

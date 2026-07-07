@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import mod.kelvinlby.OpenCrafterLink;
 import mod.kelvinlby.link.LinkConfig;
+import mod.kelvinlby.recorder.FfmpegEncoder;
 import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
@@ -79,6 +80,23 @@ public class OclConfig {
 	public boolean recordDataset = false;
 	/** Recorder sample rate in Hz (aligned RGBD-frame + action-set samples per second). Default = one per vanilla tick. */
 	public int recordSampleHz = 20;
+
+	// --- Recording / video encoding (rgb.mp4 via a system-installed ffmpeg; see FfmpegEncoder) ---
+	/** Encoder family: AUTO tries the GPU encoders first then falls back to CPU x264/x265. */
+	public FfmpegEncoder.Backend recordBackend = FfmpegEncoder.Backend.AUTO;
+	/** Output codec. H264 is the compatibility default; H265 is smaller at the same quality. */
+	public FfmpegEncoder.Codec recordCodec = FfmpegEncoder.Codec.H264;
+	/** CRF/CQ-style quality, 0–51, lower = better/larger. 18 is visually near-lossless. */
+	public int recordQuality = 18;
+	/** Keyframe ("reset") interval in seconds; also bounds how much video a hard crash can lose. */
+	public int recordKeyframeSec = 2;
+	/** Explicit path to the ffmpeg binary. Blank = search the system PATH. */
+	public String ffmpegPath = "";
+
+	/** Snapshot the video-encoding settings for a recording session. */
+	public FfmpegEncoder.Settings toVideoSettings() {
+		return new FfmpegEncoder.Settings(ffmpegPath, recordBackend, recordCodec, recordQuality, recordKeyframeSec);
+	}
 
 	/** Shared singleton so the Mod Menu factory and any future runtime reader see the same state. */
 	public static OclConfig get() {
