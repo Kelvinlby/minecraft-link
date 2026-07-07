@@ -24,13 +24,13 @@ import java.nio.file.attribute.PosixFilePermissions;
 public final class LinkConfig {
 	private LinkConfig() {}
 
-	/** Default canonical TCP ports, mirrored in {@code tools/README.md}'s wire table. */
+	/** Default canonical TCP ports, mirrored in {@code pylib/README.md}'s wire table. */
 	public static final int TELEMETRY_PORT = 5557;
 	public static final int INSTRUCTION_PORT = 5558;
 	public static final int VISION_PORT = 5559;
 
 	/**
-	 * Canonical UDS socket filenames, mirrored in {@code tools/README.md}'s wire table. The mod BINDs a
+	 * Canonical UDS socket filenames, mirrored in {@code pylib/README.md}'s wire table. The mod BINDs a
 	 * server socket at {@link #UDS_TELEMETRY} and {@link #UDS_VISION} (the controller connects); it
 	 * CONNECTs to {@link #UDS_INSTRUCTION} (the controller binds a server there). The three files live in
 	 * the directory chosen by {@link #resolveUdsDir()}.

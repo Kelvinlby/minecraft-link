@@ -5,7 +5,8 @@
 A client-side **Fabric** mod that bridges a running Minecraft client to an external
 **Open Crafter** controller over [ZeroMQ](https://zeromq.org/). It streams the player's
 state and a real RGBD view of the world *out*, and applies movement / look / action
-instructions *in* — turning a vanilla client into a controllable embodied environment.
+instructions *in* — turning a vanilla client into a controllable embodied environment. It can
+also **record** aligned RGBD-frame + player-action datasets straight from human play.
 
 - **Minecraft:** 1.21.11 · **Loader:** Fabric · **Side:** client only
 - **Transport:** Unix domain sockets (`AF_UNIX`, length-prefixed framing) by default — a
@@ -58,9 +59,34 @@ the vision resolution updates without a client restart.
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| **TCP URL** | `tcp://127.0.0.1` | Controller host for the inbound instruction stream |
-| **Camera width**  | `256` | Width of published vision frames (px) |
-| **Camera height** | `144` | Height of published vision frames (px) |
+| **Transport** | `UDS` | Link transport — `UDS` (local `AF_UNIX`) or `TCP` (ZMQ, networked) |
+| **TCP URL** | `tcp://127.0.0.1` | TCP mode: controller host for the inbound instruction stream |
+| **UDS directory** | *(blank)* | UDS mode: directory for the `.sock` files; blank = auto-resolve |
+| **Camera width**  | `768` | Width of published vision frames (px) |
+| **Camera height** | `432` | Height of published vision frames (px) |
+
+### Recording (dataset capture)
+
+The **Recording** tab arms a dataset recorder: while enabled, every world you enter (single- or
+multiplayer) is captured to its own session under `<gameDir>/open-crafter-link/<timestamp>/` and
+finalized (async, with a save-progress toast) when you leave the world — menus and the title screen
+are never recorded. Each session holds aligned RGBD frames + player actions sampled at
+**Sample rate** Hz (default `20`, one per tick), recorded at the Sensors-tab camera resolution (the
+recorder taps the link's existing vision pipeline, so there is no separate recording resolution).
+
+RGB is encoded to `rgb.mp4` through a **system-installed FFmpeg** (configurable codec/quality/keyframe
+interval and GPU-vs-CPU backend); actions and depth are still written even when no ffmpeg binary is
+found.
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| **Record dataset** | `false` | Arm world-scoped dataset recording |
+| **Sample rate** | `20` Hz | Aligned samples per second (20 = one per tick) |
+| **Encoder backend** | `AUTO` | `AUTO` (GPU→CPU), `GPU`, or `CPU` ffmpeg encoding |
+| **Codec** | `H264` | Output video codec (`H264` or `H265`) |
+| **Quality** | `18` | CRF/CQ (0–51, lower = better/larger) |
+| **Keyframe interval** | `2` s | Seconds between keyframes |
+| **FFmpeg path** | *(blank)* | Explicit ffmpeg binary; blank = search `PATH` |
 
 ### Launch-property overrides
 
@@ -72,6 +98,8 @@ Set via JVM args (`-Docl.<name>=<value>`); when present, these win over the in-g
 | `ocl.visionMaxHz` | `40` | Cap on capture rate |
 | `ocl.visionBoxFilter` | `false` | Box-average RGB on downsample instead of nearest-neighbour |
 | `ocl.pubEndpoint` / `ocl.subEndpoint` / `ocl.visPubEndpoint` | derived | Pin a full ZMQ endpoint string |
+| `ocl.udsDir` | from settings | Pin the directory holding the UDS `.sock` files |
+| `ocl.ffmpegPath` | from settings | Pin the ffmpeg binary used for `rgb.mp4` recording |
 
 ## Building
 
@@ -107,4 +135,4 @@ in-game settings are wired into the live runtime.
   directory note.
 - **Vision downsampling** maps the framebuffer onto the target resolution per-axis with no
   aspect-ratio correction; pick a camera width/height matching your window aspect to avoid
-  a squashed image (the 256×144 default suits a typical 16:9 window).
+  a squashed image (the 768×432 default suits a typical 16:9 window).
