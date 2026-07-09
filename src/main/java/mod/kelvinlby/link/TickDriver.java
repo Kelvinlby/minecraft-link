@@ -35,6 +35,9 @@ public final class TickDriver {
 		return new OutboundSnapshot(
 				player.getYaw(),
 				player.getPitch(),
-				player.getInventory().getSelectedSlot());
+				player.getInventory().getSelectedSlot(),
+				player.getHealth(),
+				player.getHungerManager().getFoodLevel(),
+				player.experienceLevel);
 	}
 }

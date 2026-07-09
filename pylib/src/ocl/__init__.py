@@ -8,7 +8,7 @@ telemetry, read the RGBD vision stream, and drive the player.
 
     with Ocl() as link:
         t = link.read_telemetry()                 # newest player state
-        print(t.yaw, t.pitch, t.slot)
+        print(t.yaw, t.pitch, t.slot, t.health, t.food, t.xp_level)
 
         link.drive(forward=True, sprint=True)     # one instruction (hold from your loop)
         link.look(yaw=90, pitch=0)                # absolute rotation
@@ -184,9 +184,15 @@ class Telemetry:
     yaw: float
     pitch: float
     slot: int
+    health: float
+    food: int
+    xp_level: int
 
     def __str__(self) -> str:
-        return f"yaw={self.yaw:8.2f}  pitch={self.pitch:7.2f}  slot={self.slot}"
+        return (
+            f"yaw={self.yaw:8.2f}  pitch={self.pitch:7.2f}  slot={self.slot}  "
+            f"health={self.health:5.1f}  food={self.food}  xp={self.xp_level}"
+        )
 
 
 @dataclass(frozen=True)
@@ -255,15 +261,15 @@ class Instruction:
 # Codec                                                                        #
 # --------------------------------------------------------------------------- #
 def decode_telemetry(buf: bytes) -> Telemetry:
-    # magic[4] ver[1] yaw[f] pitch[f] slot[i]
-    if len(buf) < 5 + 4 + 4 + 4:
+    # magic[4] ver[1] yaw[f] pitch[f] slot[i] health[f] food[i] xpLevel[i]
+    if len(buf) < 5 + 4 + 4 + 4 + 4 + 4 + 4:
         raise ValueError(f"OCLO too short: {len(buf)} bytes")
     if buf[:4] != MAGIC_OUT:
         raise ValueError(f"bad OCLO magic: {buf[:4]!r}")
     if buf[4] != VERSION:
         raise ValueError(f"bad OCLO version: {buf[4]}")
-    yaw, pitch, slot = struct.unpack_from("<ffi", buf, 5)
-    return Telemetry(yaw, pitch, slot)
+    yaw, pitch, slot, health, food, xp_level = struct.unpack_from("<ffifii", buf, 5)
+    return Telemetry(yaw, pitch, slot, health, food, xp_level)
 
 
 def decode_vision(buf: bytes) -> VisionFrame:

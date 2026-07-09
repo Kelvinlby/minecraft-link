@@ -9,9 +9,15 @@ package mod.kelvinlby.link;
  * @param yaw          player yaw in degrees
  * @param pitch        player pitch in degrees ([-90, 90])
  * @param selectedSlot main-hand hotbar slot (0..8)
+ * @param health       current health in half-heart points (0..20)
+ * @param food         current hunger/food level (0..20)
+ * @param xpLevel      current experience level
  */
 public record OutboundSnapshot(
 		float yaw,
 		float pitch,
-		int selectedSlot) {
+		int selectedSlot,
+		float health,
+		int food,
+		int xpLevel) {
 }

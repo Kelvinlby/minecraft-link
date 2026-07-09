@@ -17,6 +17,9 @@ import java.nio.ByteOrder;
  *   yaw     : f32
  *   pitch   : f32
  *   slot    : i32                     (0..8)
+ *   health  : f32                     half-heart points (0..20)
+ *   food    : i32                     hunger/food level (0..20)
+ *   xpLevel : i32                     experience level
  * </pre>
  *
  * <h2>Inbound — controller -&gt; Minecraft ("OCLI")</h2>
@@ -67,9 +70,13 @@ public final class BinaryCodec {
 	/** Header (magic + version) common to both directions. */
 	private static final int HEADER = 4 + 1;
 
-	/** Encode a telemetry snapshot as an {@code OCLO} message: header + yaw + pitch + slot. */
+	/**
+	 * Encode a telemetry snapshot as an {@code OCLO} message:
+	 * header + yaw + pitch + slot + health + food + xpLevel.
+	 */
 	public static byte[] encodeOutbound(OutboundSnapshot s) {
-		int size = HEADER + 4 /* yaw */ + 4 /* pitch */ + 4 /* slot */;
+		int size = HEADER + 4 /* yaw */ + 4 /* pitch */ + 4 /* slot */
+				+ 4 /* health */ + 4 /* food */ + 4 /* xpLevel */;
 
 		ByteBuffer buf = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
 		buf.put(MAGIC_OUT);
@@ -77,6 +84,9 @@ public final class BinaryCodec {
 		buf.putFloat(s.yaw());
 		buf.putFloat(s.pitch());
 		buf.putInt(s.selectedSlot());
+		buf.putFloat(s.health());
+		buf.putInt(s.food());
+		buf.putInt(s.xpLevel());
 		return buf.array();
 	}
 
