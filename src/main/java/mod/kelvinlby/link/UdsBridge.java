@@ -13,6 +13,7 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
@@ -49,8 +50,14 @@ public final class UdsBridge implements LinkBridge {
 
 	/** Latest telemetry waiting to be published. Tick thread writes; sender thread drains. */
 	private final AtomicReference<OutboundSnapshot> outbox = new AtomicReference<>();
-	/** Latest instruction received. Receiver thread writes; tick thread drains-and-clears. */
+	/** Latest movement instruction received. Receiver thread writes; tick thread drains-and-clears. */
 	private final AtomicReference<InboundInstruction> inbox = new AtomicReference<>();
+	/**
+	 * Pending inventory actions. Receiver thread offers; tick thread polls. Non-conflating (FIFO) so no
+	 * action is lost when movement floods the inbox; bounded so a runaway sender can't grow it unbounded.
+	 */
+	private final ConcurrentLinkedQueue<InventoryAction> actionQueue = new ConcurrentLinkedQueue<>();
+	private static final int MAX_ACTIONS = 64;
 
 	/** Latest raw framebuffer readback. Render thread writes; vision worker drains. */
 	private final AtomicReference<RawFrame> visionRaw = new AtomicReference<>();
@@ -146,6 +153,22 @@ public final class UdsBridge implements LinkBridge {
 	}
 
 	@Override
+	public InventoryAction takeAction() {
+		return actionQueue.poll();
+	}
+
+	/** Receiver thread: enqueue a real action, dropping the oldest if the bounded queue is full. */
+	private void enqueueAction(InventoryAction action) {
+		if (action == null || action.op() == InventoryAction.Op.NONE) {
+			return;
+		}
+		while (actionQueue.size() >= MAX_ACTIONS) {
+			actionQueue.poll(); // drop-oldest safety valve; actions are rare so this shouldn't trigger
+		}
+		actionQueue.offer(action);
+	}
+
+	@Override
 	public void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth) {
 		visionRaw.set(new RawFrame(w, h, near, far, rgba, depth));
 		LockSupport.unpark(visionWorkerThread);
@@ -190,8 +213,10 @@ public final class UdsBridge implements LinkBridge {
 					if (payload == null) {
 						break; // peer closed — reconnect
 					}
-					inbox.set(BinaryCodec.decodeInbound(payload)); // conflating: newest wins
-				}
+					BinaryCodec.InboundMessage msg = BinaryCodec.decodeInbound(payload);
+						inbox.set(msg.movement()); // movement conflates: newest wins
+						enqueueAction(msg.action()); // actions are FIFO, never conflated
+					}
 			} catch (IOException e) {
 				if (running) {
 					OpenCrafterLink.LOGGER.debug("[open-crafter-link] instruction stream reconnecting", e);

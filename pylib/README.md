@@ -37,6 +37,19 @@ with Ocl() as link:                       # endpoints default to LinkConfig's
     link.drive(forward=True, sprint=True)     # one instruction
     link.hold(2.0, forward=True)              # *hold* a movement (republish each tick)
 
+    inv = link.read_inventory()               # current screen's inventory (or None)
+    if inv:
+        for s in inv.by_name("hotbar").slots:
+            print(s.item, s.count, s.enabled)
+    link.move("hotbar", 0)                     # quick-move (shift-click)
+    link.pick("inventory", 5)                 # left-click; picks up onto the cursor
+    link.put("generic_9x3", 2)                # right-click a chest slot (extension group)
+    link.swap("hotbar", 0, "inventory", 5)    # number-key swap (one side must be hotbar)
+    link.drop()                               # drop one item (vanilla drop key)
+    link.discard()                            # throw the whole cursor stack out of the GUI
+    link.distribute([("inventory", 0), ("inventory", 1), ("inventory", 2)])  # left-drag split
+    link.collect("inventory", 0)              # double-click: gather matching items onto the cursor
+
     f = link.read_vision()                    # newest RGBD frame
     if f:
         print(f.w, f.h, f.center_depth_blocks())
@@ -111,6 +124,22 @@ ocl drive --look 90 0          # face yaw 90
 ocl drive --forward --sprint --hold 2
 ocl drive --slot 4 --hold 0    # single shot
 ocl drive --demo               # walk through every control
+
+# Inventory: read the current screen's slots (group by group), --all shows empties
+ocl inventory
+ocl inventory --all
+
+# Inventory actions. group = hotbar/offhand/armor/inventory/discard, or a container
+# registry id (generic_9x3, anvil, crafting, ...) for extension slots; index defaults to 0.
+ocl move hotbar 0              # quick-move (shift-click)
+ocl pick inventory 5          # left-click
+ocl put generic_9x3 2         # right-click a chest slot
+ocl swap hotbar 0 inventory 5 # number-key swap (one side must be hotbar)
+ocl drop                      # drop one item (no screen: selected hotbar; screen: addressed slot)
+ocl drop inventory 5          # in a screen, drop one item from inventory slot 5
+ocl discard                   # throw the whole cursor stack out of the GUI
+ocl distribute inventory 0 inventory 1 inventory 2   # left-drag: split cursor stack over these slots
+ocl collect inventory 0       # double-click: gather all matching items onto the cursor
 
 # Closed loop: send a rotation, read telemetry back, assert it actually changed
 ocl roundtrip --yaw 123 --pitch -20

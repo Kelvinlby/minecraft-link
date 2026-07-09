@@ -8,6 +8,7 @@ import org.zeromq.ZMQ;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
@@ -29,8 +30,14 @@ public final class ZmqBridge implements LinkBridge {
 
 	/** Latest telemetry waiting to be published. Tick thread writes; sender thread drains. */
 	private final AtomicReference<OutboundSnapshot> outbox = new AtomicReference<>();
-	/** Latest instruction received. Receiver thread writes; tick thread drains-and-clears. */
+	/** Latest movement instruction received. Receiver thread writes; tick thread drains-and-clears. */
 	private final AtomicReference<InboundInstruction> inbox = new AtomicReference<>();
+	/**
+	 * Pending inventory actions. Receiver thread offers; tick thread polls. Non-conflating (FIFO) so no
+	 * action is lost even though ZMQ's {@code CONFLATE} + the {@code inbox} both conflate movement.
+	 */
+	private final ConcurrentLinkedQueue<InventoryAction> actionQueue = new ConcurrentLinkedQueue<>();
+	private static final int MAX_ACTIONS = 64;
 
 	/** Latest raw framebuffer readback. Render thread writes; vision worker drains. */
 	private final AtomicReference<RawFrame> visionRaw = new AtomicReference<>();
@@ -119,6 +126,22 @@ public final class ZmqBridge implements LinkBridge {
 		return inbox.getAndSet(null);
 	}
 
+	@Override
+	public InventoryAction takeAction() {
+		return actionQueue.poll();
+	}
+
+	/** Receiver thread: enqueue a real action, dropping the oldest if the bounded queue is full. */
+	private void enqueueAction(InventoryAction action) {
+		if (action == null || action.op() == InventoryAction.Op.NONE) {
+			return;
+		}
+		while (actionQueue.size() >= MAX_ACTIONS) {
+			actionQueue.poll(); // drop-oldest safety valve; actions are rare so this shouldn't trigger
+		}
+		actionQueue.offer(action);
+	}
+
 	/**
 	 * Render thread: hand off raw, already-downsampled framebuffer bytes. O(1), non-blocking,
 	 * conflating (newest wins — a frame the worker hasn't picked up yet is simply dropped). The
@@ -167,7 +190,9 @@ public final class ZmqBridge implements LinkBridge {
                 if (msg == null) {
                     continue;
                 }
-                inbox.set(BinaryCodec.decodeInbound(msg)); // conflating: newest instruction wins
+                BinaryCodec.InboundMessage decoded = BinaryCodec.decodeInbound(msg);
+                inbox.set(decoded.movement()); // movement conflates: newest instruction wins
+                enqueueAction(decoded.action()); // actions are FIFO, never conflated
             }
         } catch (Throwable t) {
             if (running) {

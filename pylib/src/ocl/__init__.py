@@ -71,6 +71,9 @@ __all__ = [
     "Telemetry",
     "VisionFrame",
     "Instruction",
+    "Slot",
+    "SlotGroupData",
+    "Inventory",
     "decode_telemetry",
     "decode_vision",
     "encode_instruction",
@@ -162,7 +165,7 @@ def _uds_path(endpoint: str, name: str, uds_dir: Optional[str]) -> str:
 MAGIC_OUT = b"OCLO"
 MAGIC_IN = b"OCLI"
 MAGIC_VIS = b"OCLV"
-VERSION = 1
+VERSION = 2          # bumped to 2 when inventory was added to OCLO/OCLI (BinaryCodec.VERSION)
 VIS_VERSION = 1
 
 # OCLI movement bitmask (BinaryCodec.M_*). NOTE: this order is the codec's, which
@@ -171,6 +174,24 @@ M_FRONT, M_BACK, M_LEFT, M_RIGHT = 1 << 0, 1 << 1, 1 << 2, 1 << 3
 M_JUMP, M_SPRINT, M_SNEAK = 1 << 4, 1 << 5, 1 << 6
 A_ATTACK, A_INTERACT = 1 << 0, 1 << 1
 
+# Slot group wire opcodes (Java SlotGroup.wireId). The controller addresses slots by (group, index).
+G_HOTBAR, G_OFFHAND, G_ARMOR, G_INVENTORY, G_CURSOR, G_DISCARD, G_EXTENSION = 0, 1, 2, 3, 4, 5, 6
+
+# Canonical names for the fixed (non-extension) groups; extension carries its own registry id on the wire.
+GROUP_NAMES = {
+    G_HOTBAR: "hotbar",
+    G_OFFHAND: "offhand",
+    G_ARMOR: "armor",
+    G_INVENTORY: "inventory",
+    G_CURSOR: "cursor",
+    G_DISCARD: "discard",
+}
+# Reverse lookup for addressing by name (extension groups are addressed by their registry-id name).
+GROUP_IDS = {v: k for k, v in GROUP_NAMES.items()}
+
+# Inventory action opcodes (Java InventoryAction.Op.wireId).
+OP_NONE, OP_MOVE, OP_PICK, OP_PUT, OP_SWAP, OP_DROP, OP_DISTRIBUTE, OP_COLLECT = 0, 1, 2, 3, 4, 5, 6, 7
+
 NAN = float("nan")
 
 
@@ -178,8 +199,60 @@ NAN = float("nan")
 # Messages                                                                     #
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
+class Slot:
+    """One slot in an inventory group. `item` is a Minecraft item id ("minecraft:xxx") or None when
+    empty; `count` is 0 for an empty slot; `enabled` is False only for a toggled-off auto-crafter slot."""
+
+    item: Optional[str]
+    count: int
+    enabled: bool
+
+    @property
+    def empty(self) -> bool:
+        return self.item is None
+
+
+@dataclass(frozen=True)
+class SlotGroupData:
+    """One slot group of the current screen. `group` is a G_* opcode; `name` is the canonical group
+    name for fixed groups, or the container registry id (e.g. "minecraft:generic_9x3") for extension."""
+
+    group: int
+    name: str
+    slots: tuple  # tuple[Slot, ...], index i = group-local index i
+
+    def __str__(self) -> str:
+        shown = ", ".join(
+            f"{i}:{s.item.split(':')[-1]}x{s.count}{'' if s.enabled else '(off)'}"
+            for i, s in enumerate(self.slots) if not s.empty
+        )
+        return f"{self.name}[{len(self.slots)}]: {shown}" if shown else f"{self.name}[{len(self.slots)}]: (empty)"
+
+
+@dataclass(frozen=True)
+class Inventory:
+    """Decoded inventory section of an OCLO message: the groups visible in the current screen."""
+
+    groups: tuple  # tuple[SlotGroupData, ...]
+
+    def group(self, group_id: int) -> "Optional[SlotGroupData]":
+        """First group with the given G_* opcode (there is at most one per opcode)."""
+        for g in self.groups:
+            if g.group == group_id:
+                return g
+        return None
+
+    def by_name(self, name: str) -> "Optional[SlotGroupData]":
+        """Group by its wire name (fixed group name like 'hotbar', or an extension registry id)."""
+        for g in self.groups:
+            if g.name == name:
+                return g
+        return None
+
+
+@dataclass(frozen=True)
 class Telemetry:
-    """Decoded OCLO message: the player's current state."""
+    """Decoded OCLO message: the player's current state, plus the current screen's inventory."""
 
     yaw: float
     pitch: float
@@ -187,6 +260,7 @@ class Telemetry:
     health: float
     food: int
     xp_level: int
+    inventory: Optional[Inventory] = None
 
     def __str__(self) -> str:
         return (
@@ -233,7 +307,8 @@ class VisionFrame:
 
 @dataclass(frozen=True)
 class Instruction:
-    """An OCLI control message. Build with kwargs, send via `Ocl.send`."""
+    """An OCLI control message: movement plus an optional discrete inventory action. Build with kwargs,
+    send via `Ocl.send`. `slot_a`/`slot_b` are (group_id, index) tuples used by the inventory action."""
 
     front: bool = False
     back: bool = False
@@ -247,6 +322,10 @@ class Instruction:
     interact: bool = False
     yaw: float = NAN        # absolute rotation in degrees; NaN = no change
     pitch: float = NAN
+    inv_op: int = OP_NONE                       # inventory action opcode (OP_*)
+    slot_a: Optional[tuple] = None              # (group_id, index) for the action's primary operand
+    slot_b: Optional[tuple] = None              # (group_id, index) for SWAP's second operand
+    slot_list: Optional[tuple] = None           # ((group_id, index), ...) for DISTRIBUTE targets
 
     def encode(self) -> bytes:
         return encode_instruction(
@@ -254,6 +333,7 @@ class Instruction:
             jump=self.jump, sprint=self.sprint, sneak=self.sneak,
             slot=self.slot, attack=self.attack, interact=self.interact,
             yaw=self.yaw, pitch=self.pitch,
+            inv_op=self.inv_op, slot_a=self.slot_a, slot_b=self.slot_b, slot_list=self.slot_list,
         )
 
 
@@ -261,7 +341,7 @@ class Instruction:
 # Codec                                                                        #
 # --------------------------------------------------------------------------- #
 def decode_telemetry(buf: bytes) -> Telemetry:
-    # magic[4] ver[1] yaw[f] pitch[f] slot[i] health[f] food[i] xpLevel[i]
+    # magic[4] ver[1] yaw[f] pitch[f] slot[i] health[f] food[i] xpLevel[i]  then the inventory section.
     if len(buf) < 5 + 4 + 4 + 4 + 4 + 4 + 4:
         raise ValueError(f"OCLO too short: {len(buf)} bytes")
     if buf[:4] != MAGIC_OUT:
@@ -269,7 +349,32 @@ def decode_telemetry(buf: bytes) -> Telemetry:
     if buf[4] != VERSION:
         raise ValueError(f"bad OCLO version: {buf[4]}")
     yaw, pitch, slot, health, food, xp_level = struct.unpack_from("<ffifii", buf, 5)
-    return Telemetry(yaw, pitch, slot, health, food, xp_level)
+    inventory = _decode_inventory(buf, 5 + 24)  # offset past the fixed 24-byte control block
+    return Telemetry(yaw, pitch, slot, health, food, xp_level, inventory)
+
+
+def _decode_inventory(buf: bytes, off: int) -> "Optional[Inventory]":
+    """Parse the OCLO inventory section starting at `off` (see BinaryCodec's OCLO layout)."""
+    if off >= len(buf):
+        return None  # no inventory section present
+    (group_count,) = struct.unpack_from("<B", buf, off)
+    off += 1
+    groups = []
+    for _ in range(group_count):
+        (opcode,) = struct.unpack_from("<B", buf, off); off += 1
+        (name_len,) = struct.unpack_from("<H", buf, off); off += 2
+        name = buf[off:off + name_len].decode("utf-8"); off += name_len
+        (slot_count,) = struct.unpack_from("<H", buf, off); off += 2
+        slots = []
+        for _ in range(slot_count):
+            (item_len,) = struct.unpack_from("<H", buf, off); off += 2
+            item = buf[off:off + item_len].decode("utf-8") if item_len else None
+            off += item_len
+            (count, flags) = struct.unpack_from("<hB", buf, off); off += 3
+            slots.append(Slot(item, count, bool(flags & 1)))
+        display = name if name else GROUP_NAMES.get(opcode, f"group{opcode}")
+        groups.append(SlotGroupData(opcode, display, tuple(slots)))
+    return Inventory(tuple(groups))
 
 
 def decode_vision(buf: bytes) -> VisionFrame:
@@ -292,12 +397,27 @@ def decode_vision(buf: bytes) -> VisionFrame:
     return VisionFrame(w, h, near, far, rgb, depth)
 
 
+def _addr(group, index: int) -> tuple:
+    """Resolve a slot address to (group_opcode, index) for the wire.
+
+    `group` may be a G_* int, a fixed-group name ('hotbar', 'discard', ...), or an extension registry id
+    ('minecraft:generic_9x3', 'generic_9x3', 'anvil', ...). Any name that isn't a fixed group maps to
+    G_EXTENSION — the mod resolves the extension group by position, not by name."""
+    if isinstance(group, int):
+        return (group, index)
+    name = str(group)
+    if name in GROUP_IDS:
+        return (GROUP_IDS[name], index)
+    return (G_EXTENSION, index)  # a container registry id -> the extension group
+
+
 def encode_instruction(
     *,
     front=False, back=False, left=False, right=False,
     jump=False, sprint=False, sneak=False,
     slot=-1, attack=False, interact=False,
     yaw=NAN, pitch=NAN,
+    inv_op=OP_NONE, slot_a=None, slot_b=None, slot_list=None,
 ) -> bytes:
     move = 0
     move |= M_FRONT if front else 0
@@ -308,8 +428,21 @@ def encode_instruction(
     move |= M_SPRINT if sprint else 0
     move |= M_SNEAK if sneak else 0
     action = (A_ATTACK if attack else 0) | (A_INTERACT if interact else 0)
-    # magic[4] ver[1] move[B] slot[i] action[B] yaw[f] pitch[f]
-    return MAGIC_IN + struct.pack("<BBiBff", VERSION, move, slot, action, yaw, pitch)
+    a_group, a_index = slot_a if slot_a is not None else (0, 0)
+    b_group, b_index = slot_b if slot_b is not None else (0, 0)
+    # magic[4] ver[1] move[B] slot[i] action[B] yaw[f] pitch[f]  invOp[B] aGroup[B] aIndex[h] bGroup[B] bIndex[h]
+    out = MAGIC_IN + struct.pack(
+        "<BBiBff" "BBhBh",
+        VERSION, move, slot, action, yaw, pitch,
+        inv_op, a_group, a_index, b_group, b_index,
+    )
+    # DISTRIBUTE appends a variable slot list: slotCount[B] then per slot group[B] index[h].
+    if inv_op == OP_DISTRIBUTE:
+        targets = slot_list or ()
+        out += struct.pack("<B", len(targets))
+        for group_id, index in targets:
+            out += struct.pack("<Bh", group_id, index)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -658,6 +791,54 @@ class Ocl:
 
     def interact(self) -> None:
         self.drive(interact=True)
+
+    # ---- inventory --------------------------------------------------------- #
+    def read_inventory(self, timeout: float = 1.0) -> Optional[Inventory]:
+        """Return the current screen's inventory (newest telemetry's inventory), or None."""
+        t = self.read_telemetry(timeout)
+        return t.inventory if t is not None else None
+
+    def move(self, group, index: int = 0) -> None:
+        """Quick-move (shift-click) the slot at (group, index). No-op on the discard slot."""
+        self.drive(inv_op=OP_MOVE, slot_a=_addr(group, index))
+
+    def pick(self, group, index: int = 0) -> None:
+        """Left-click the slot. On the discard slot, throws the whole cursor stack out of the GUI."""
+        self.drive(inv_op=OP_PICK, slot_a=_addr(group, index))
+
+    def put(self, group, index: int = 0) -> None:
+        """Right-click the slot. On the discard slot, throws a single item from the cursor."""
+        self.drive(inv_op=OP_PUT, slot_a=_addr(group, index))
+
+    def swap(self, group_a, index_a: int, group_b, index_b: int) -> None:
+        """Swap two slots via a number-key press. Both must be non-cursor/non-discard and at least one
+        must be a hotbar slot, else the mod treats it as a no-op."""
+        self.drive(inv_op=OP_SWAP, slot_a=_addr(group_a, index_a), slot_b=_addr(group_b, index_b))
+
+    def distribute(self, slots) -> None:
+        """Distribute the cursor stack evenly across `slots` — the vanilla left-click drag, applied in a
+        single tick (no per-slot dragging). Requires a stack held on the cursor first (e.g. via `pick`).
+
+        `slots` is an iterable of (group, index) pairs, where group is a name ('hotbar', 'inventory',
+        a container id, ...) or a G_* opcode. Example: link.distribute([("inventory", 0), ("inventory", 1)])."""
+        targets = tuple(_addr(g, i) for g, i in slots)
+        self.drive(inv_op=OP_DISTRIBUTE, slot_list=targets)
+
+    def collect(self, group, index: int = 0) -> None:
+        """Gather all matching items onto the cursor — the vanilla double-click on (group, index). Emitted
+        as a PICKUP then PICKUP_ALL on the slot in a single tick, so the cursor ends holding as much of that
+        item as it can from the open inventory."""
+        self.drive(inv_op=OP_COLLECT, slot_a=_addr(group, index))
+
+    def drop(self, group="hotbar", index: int = 0) -> None:
+        """Drop one item, exactly like the vanilla drop key. With no screen open, drops one item from the
+        selected hotbar stack (the (group, index) is ignored, matching vanilla). With a screen open, drops
+        one item from the addressed slot."""
+        self.drive(inv_op=OP_DROP, slot_a=_addr(group, index))
+
+    def discard(self) -> None:
+        """Throw the whole cursor stack out of the GUI (shorthand for pick('discard'))."""
+        self.pick("discard", 0)
 
     # ---- describe (for CLI banners) --------------------------------------- #
     def describe_telemetry(self) -> str:

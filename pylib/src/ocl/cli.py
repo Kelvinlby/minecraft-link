@@ -145,6 +145,48 @@ def _drive_demo(link: Ocl):
     return 0
 
 
+def _cmd_inventory(link: Ocl, args):
+    inv = link.read_inventory(timeout=2.0)
+    if inv is None:
+        print("[inventory] no telemetry (is the mod running and in a world?)")
+        return 1
+    if not inv.groups:
+        print("[inventory] (no groups)")
+        return 0
+    for g in inv.groups:
+        print(f"{g.name}  ({len(g.slots)} slots)")
+        for i, s in enumerate(g.slots):
+            if s.empty and not args.all:
+                continue
+            item = s.item if s.item else "—"
+            flag = "" if s.enabled else "  [disabled]"
+            print(f"    {i:>2}: {item} x{s.count}{flag}")
+    return 0
+
+
+def _cmd_slot_action(link: Ocl, args):
+    """Dispatch the move/pick/put/swap/discard subcommands to the matching Ocl method."""
+    op = args.slot_action
+    if op == "discard":
+        link.discard()
+        print("[slot] discard (threw the whole cursor stack)")
+    elif op == "swap":
+        link.swap(args.group_a, args.index_a, args.group_b, args.index_b)
+        print(f"[slot] swap {args.group_a}[{args.index_a}] <-> {args.group_b}[{args.index_b}]")
+    elif op == "distribute":
+        if len(args.pairs) % 2 != 0 or not args.pairs:
+            print("[slot] distribute needs pairs of GROUP INDEX (e.g. inventory 0 inventory 1)")
+            return 2
+        slots = [(args.pairs[i], int(args.pairs[i + 1])) for i in range(0, len(args.pairs), 2)]
+        link.distribute(slots)
+        print("[slot] distribute -> " + ", ".join(f"{g}[{i}]" for g, i in slots))
+    else:
+        getattr(link, op)(args.group, args.index)
+        print(f"[slot] {op} {args.group}[{args.index}]")
+    time.sleep(0.1)  # let the one-shot instruction land before we exit
+    return 0
+
+
 def _cmd_roundtrip(link: Ocl, args):
     before = link.read_telemetry(timeout=2.0)
     if before is None:
@@ -452,6 +494,39 @@ def _build_parser():
     d.add_argument("--hold", type=float, default=1.0,
                    help="republish for N seconds to hold a movement (0 = single shot)")
     d.set_defaults(func=_cmd_drive)
+
+    inv = sub.add_parser("inventory", help="read + decode the current screen's inventory (OCLO)")
+    inv.add_argument("--all", action="store_true", help="also show empty slots")
+    inv.set_defaults(func=_cmd_inventory)
+
+    # Inventory actions. group is a name: hotbar/offhand/armor/inventory/discard, or a container
+    # registry id (e.g. generic_9x3, anvil, crafting) for extension slots.
+    for name, helptext in (
+        ("move", "quick-move (shift-click) a slot"),
+        ("pick", "left-click a slot (discard = throw whole cursor stack)"),
+        ("put", "right-click a slot (discard = throw one item)"),
+        ("drop", "drop one item (vanilla drop key): no screen = selected hotbar; screen = the addressed slot"),
+        ("collect", "double-click a slot: gather all matching items onto the cursor"),
+    ):
+        sp = sub.add_parser(name, help=helptext)
+        sp.add_argument("group", nargs="?", default="hotbar",
+                        help="slot group: hotbar/offhand/armor/inventory/discard or a container id")
+        sp.add_argument("index", type=int, nargs="?", default=0, help="group-local index (default 0)")
+        sp.set_defaults(func=_cmd_slot_action, slot_action=name)
+
+    sw = sub.add_parser("swap", help="swap two slots (at least one must be a hotbar slot)")
+    sw.add_argument("group_a"); sw.add_argument("index_a", type=int)
+    sw.add_argument("group_b"); sw.add_argument("index_b", type=int)
+    sw.set_defaults(func=_cmd_slot_action, slot_action="swap")
+
+    ds = sub.add_parser("discard", help="throw the whole cursor stack out of the GUI")
+    ds.set_defaults(func=_cmd_slot_action, slot_action="discard")
+
+    di = sub.add_parser("distribute",
+                        help="left-drag: split the cursor stack across slots (pass GROUP INDEX pairs)")
+    di.add_argument("pairs", nargs="+",
+                    help="repeated GROUP INDEX, e.g. 'inventory 0 inventory 1 generic_9x3 2'")
+    di.set_defaults(func=_cmd_slot_action, slot_action="distribute")
 
     r = sub.add_parser("roundtrip", help="send rotation, verify telemetry reflects it")
     r.add_argument("--yaw", type=float, default=90.0)

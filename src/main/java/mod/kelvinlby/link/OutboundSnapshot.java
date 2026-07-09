@@ -12,6 +12,8 @@ package mod.kelvinlby.link;
  * @param health       current health in half-heart points (0..20)
  * @param food         current hunger/food level (0..20)
  * @param xpLevel      current experience level
+ * @param inventory    normalized inventory of the current screen (see {@link InventoryMapper}); never
+ *                     null — {@link InventoryState#EMPTY} when there is no world/player
  */
 public record OutboundSnapshot(
 		float yaw,
@@ -19,5 +21,6 @@ public record OutboundSnapshot(
 		int selectedSlot,
 		float health,
 		int food,
-		int xpLevel) {
+		int xpLevel,
+		InventoryState inventory) {
 }

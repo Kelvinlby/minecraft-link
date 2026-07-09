@@ -20,8 +20,16 @@ public interface LinkBridge {
 	/** Tick thread: hand off the latest telemetry. O(1), non-blocking, conflating (newest wins). */
 	void publish(OutboundSnapshot snapshot);
 
-	/** Tick thread: consume-and-clear the latest instruction, or {@code null} if none arrived. */
+	/** Tick thread: consume-and-clear the latest movement instruction, or {@code null} if none arrived. */
 	InboundInstruction takeLatest();
+
+	/**
+	 * Tick thread: dequeue the next pending inventory action, or {@code null} if the queue is empty.
+	 * Unlike {@link #takeLatest}, actions are <b>not</b> conflated — every action a controller sends is
+	 * delivered (FIFO), so a burst of actions issued while movement streams at ~30 Hz is never dropped.
+	 * Callers drain in a loop each tick.
+	 */
+	InventoryAction takeAction();
 
 	/**
 	 * Render thread: hand off raw, already-downsampled framebuffer bytes. O(1), non-blocking,

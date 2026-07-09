@@ -1,11 +1,16 @@
 package mod.kelvinlby.link;
 
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerInteractionManager;
 import net.minecraft.client.option.GameOptions;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.math.MathHelper;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -51,20 +56,177 @@ public final class InputDriver {
 			return;
 		}
 
-		InboundInstruction in = bridge.get().takeLatest();
+		LinkBridge bridge = this.bridge.get();
+		InboundInstruction in = bridge.takeLatest();
 		if (in == null) {
-			// No fresh instruction: release once if we were driving, then go hands-off so a human can play.
+			// No fresh movement: release once if we were driving, then go hands-off so a human can play.
 			if (owningKeys) {
 				stampMovement(mc.options, InboundInstruction.NEUTRAL);
 				owningKeys = false;
 			}
-			return;
+		} else {
+			stampMovement(mc.options, in);
+			owningKeys = true;
+			applyRotation(player, in);
+			applySlot(player, in);
 		}
 
-		stampMovement(mc.options, in);
-		owningKeys = true;
-		applyRotation(player, in);
-		applySlot(player, in);
+		// Inventory actions ride the same OCLI stream but are delivered on a separate non-conflating queue,
+		// so drain them independently of movement — a controller may send an action in a movement-free
+		// frame. Draining all queued actions each tick applies a burst in order.
+		InventoryAction action;
+		while ((action = bridge.takeAction()) != null && action.op() != InventoryAction.Op.NONE) {
+			executeAction(mc, player, action);
+		}
+	}
+
+	/**
+	 * Execute one inventory action by simulating the corresponding vanilla slot click through the
+	 * interaction manager (exactly the path a human mouse/number-key press takes). Runs on the client tick
+	 * thread, where {@code clickSlot} is safe. Any unresolvable address is a silent no-op.
+	 */
+	private void executeAction(MinecraftClient mc, ClientPlayerEntity player, InventoryAction action) {
+		ClientPlayerInteractionManager im = mc.interactionManager;
+		if (im == null) {
+			return;
+		}
+		ScreenHandler handler = player.currentScreenHandler;
+		int syncId = handler.syncId;
+
+		switch (action.op()) {
+			case MOVE -> {
+				if (action.a().group() == SlotGroup.DISCARD) {
+					return; // quick-move on the virtual discard slot is a no-op
+				}
+				int slotId = InventoryMapper.resolveSlotId(player, action.a());
+				if (slotId >= 0) {
+					im.clickSlot(syncId, slotId, 0, SlotActionType.QUICK_MOVE, player);
+				}
+			}
+			case PICK -> {
+				if (action.a().group() == SlotGroup.DISCARD) {
+					// Click outside the GUI: left-click throws the whole cursor stack.
+					im.clickSlot(syncId, ScreenHandler.EMPTY_SPACE_SLOT_INDEX, 0, SlotActionType.PICKUP, player);
+					return;
+				}
+				int slotId = InventoryMapper.resolveSlotId(player, action.a());
+				if (slotId >= 0) {
+					im.clickSlot(syncId, slotId, 0, SlotActionType.PICKUP, player); // left-click
+				}
+			}
+			case PUT -> {
+				if (action.a().group() == SlotGroup.DISCARD) {
+					// Click outside the GUI: right-click throws a single item from the cursor.
+					im.clickSlot(syncId, ScreenHandler.EMPTY_SPACE_SLOT_INDEX, 1, SlotActionType.PICKUP, player);
+					return;
+				}
+				int slotId = InventoryMapper.resolveSlotId(player, action.a());
+				if (slotId >= 0) {
+					im.clickSlot(syncId, slotId, 1, SlotActionType.PICKUP, player); // right-click
+				}
+			}
+			case SWAP -> executeSwap(im, player, syncId, action);
+			case DISTRIBUTE -> executeDistribute(im, player, syncId, action);
+			case COLLECT -> {
+				if (action.a() != null && action.a().group() != SlotGroup.DISCARD
+						&& action.a().group() != SlotGroup.CURSOR) {
+					int slotId = InventoryMapper.resolveSlotId(player, action.a());
+					if (slotId >= 0) {
+						// A vanilla double-click: the first click picks the slot's stack up onto the cursor,
+						// the second (double-click) sweeps all matching stacks onto it via PICKUP_ALL.
+						im.clickSlot(syncId, slotId, 0, SlotActionType.PICKUP, player);
+						im.clickSlot(syncId, slotId, 0, SlotActionType.PICKUP_ALL, player);
+					}
+				}
+			}
+			case DROP -> {
+				if (mc.currentScreen == null) {
+					// No screen: exactly the vanilla drop key — drop one item from the selected hotbar stack,
+					// regardless of the addressed slot (matches MinecraftClient's dropKey handling).
+					player.dropSelectedItem(false);
+				} else {
+					// Screen open: drop one item from the addressed slot — the vanilla Q-on-hovered-slot path
+					// (HandledScreen.keyPressed -> clickSlot THROW, button 0 = single item).
+					if (action.a() != null && action.a().group() != SlotGroup.DISCARD
+							&& action.a().group() != SlotGroup.CURSOR) {
+						int slotId = InventoryMapper.resolveSlotId(player, action.a());
+						if (slotId >= 0) {
+							im.clickSlot(syncId, slotId, 0, SlotActionType.THROW, player);
+						}
+					}
+				}
+			}
+			case NONE -> { /* nothing */ }
+		}
+	}
+
+	/**
+	 * Swap two slots via a number-key {@code SWAP}: hover the non-hotbar slot and press the number key of
+	 * the hotbar slot. Constraints (any violation = no-op): neither operand may be cursor or discard, and
+	 * at least one must be a hotbar slot. When both are hotbar, hover {@code a} and press {@code b}'s key.
+	 */
+	private void executeSwap(ClientPlayerInteractionManager im, ClientPlayerEntity player, int syncId,
+			InventoryAction action) {
+		SlotAddress a = action.a();
+		SlotAddress b = action.b();
+		if (a == null || b == null) {
+			return;
+		}
+		if (a.group() == SlotGroup.CURSOR || a.group() == SlotGroup.DISCARD
+				|| b.group() == SlotGroup.CURSOR || b.group() == SlotGroup.DISCARD) {
+			return;
+		}
+		boolean aHotbar = a.group() == SlotGroup.HOTBAR;
+		boolean bHotbar = b.group() == SlotGroup.HOTBAR;
+		if (!aHotbar && !bHotbar) {
+			return; // at least one must be a hotbar slot
+		}
+
+		// The hovered slot is the non-hotbar one; if both are hotbar, hover a and press b's number.
+		SlotAddress hovered = aHotbar && !bHotbar ? b : a;
+		SlotAddress hotbar = (hovered == a) ? b : a;
+
+		int hoveredSlotId = InventoryMapper.resolveSlotId(player, hovered);
+		int hotbarButton = InventoryMapper.hotbarButton(hotbar);
+		if (hoveredSlotId < 0 || hotbarButton < 0) {
+			return;
+		}
+		im.clickSlot(syncId, hoveredSlotId, hotbarButton, SlotActionType.SWAP, player);
+	}
+
+	/**
+	 * Distribute the cursor stack evenly across the addressed slots — the vanilla left-click drag. Emitted
+	 * as the three-stage {@code QUICK_CRAFT} sequence (begin at -999, one add per target slot, end at -999)
+	 * within a single tick, so no cross-tick dragging is needed. Button {@code 0} = left-drag (split evenly).
+	 *
+	 * <p>Vanilla requires the cursor to hold a stack and each target to accept it; the server applies its
+	 * own checks, and any unresolvable/cursor/discard target is skipped. Nothing happens if fewer than one
+	 * valid target remains after filtering.
+	 */
+	private void executeDistribute(ClientPlayerInteractionManager im, ClientPlayerEntity player, int syncId,
+			InventoryAction action) {
+		final int button = 0; // left-drag: distribute evenly
+		List<Integer> slotIds = new ArrayList<>(action.slots().size());
+		for (SlotAddress addr : action.slots()) {
+			if (addr == null || addr.group() == SlotGroup.CURSOR || addr.group() == SlotGroup.DISCARD) {
+				continue;
+			}
+			int slotId = InventoryMapper.resolveSlotId(player, addr);
+			if (slotId >= 0 && !slotIds.contains(slotId)) { // vanilla drag visits each slot at most once
+				slotIds.add(slotId);
+			}
+		}
+		if (slotIds.isEmpty()) {
+			return;
+		}
+		im.clickSlot(syncId, ScreenHandler.EMPTY_SPACE_SLOT_INDEX,
+				ScreenHandler.packQuickCraftData(0, button), SlotActionType.QUICK_CRAFT, player); // begin
+		for (int slotId : slotIds) {
+			im.clickSlot(syncId, slotId,
+					ScreenHandler.packQuickCraftData(1, button), SlotActionType.QUICK_CRAFT, player); // add slot
+		}
+		im.clickSlot(syncId, ScreenHandler.EMPTY_SPACE_SLOT_INDEX,
+				ScreenHandler.packQuickCraftData(2, button), SlotActionType.QUICK_CRAFT, player); // end -> apply
 	}
 
 	/** Set the held state of every driven binding to the instruction's value (released for NEUTRAL). */

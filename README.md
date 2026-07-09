@@ -38,8 +38,26 @@ yaw/pitch (pitch clamped to ±90°), hotbar slot select, and attack/use clicks. 
 routed through Minecraft's own `doAttack`/`doItemUse` via an `@Invoker` mixin, so they
 respect cooldowns and emit the same packets as a real mouse press.
 
+An OCLI frame also carries an optional **inventory action** — `move` (quick-move / shift-click),
+`pick` (left-click), `put` (right-click), `swap` (number-key swap), `drop` (the vanilla drop
+key: with no screen open it drops one item from the selected hotbar stack; with a screen open it
+drops one item from the addressed slot), `distribute` (a left-click drag that splits the cursor
+stack evenly across a list of slots, emitted as the vanilla 3-stage `QUICK_CRAFT` sequence in a
+single tick), or `collect` (a double-click that gathers all matching stacks onto the cursor, emitted
+as `PICKUP` + `PICKUP_ALL`) — targeting slots by a stable `(group, index)` address (see Telemetry
+below). Because movement is a held level that
+conflates (newest wins) while an action is a discrete edge event, the bridge routes actions to a
+separate non-conflating FIFO queue so none is lost even while movement streams at ~30 Hz; the mod
+executes each via `interactionManager.clickSlot`.
+
 ### Telemetry (outbound, `OCLO`)
-Per-tick player state: yaw, pitch, selected hotbar slot.
+Per-tick player state: yaw, pitch, selected hotbar slot, health, food, XP level — followed by the
+current screen's **inventory**, normalized into stable groups (`hotbar` 0–8, `offhand` 0, `armor`
+0–3 head→feet, `inventory` 0–26, `cursor` 0, virtual `discard` 0, and an `extension` group named by
+the container's registry id, e.g. `minecraft:generic_9x3` / `minecraft:anvil` / `minecraft:crafting`).
+Each slot reports its item id (or empty), count, and enabled flag (auto-crafter slots can be
+toggled off). The mapping is screen-independent, so a `(group, index)` address means the same slot
+whether or not a container is open.
 
 ### Vision (outbound, `OCLV`)
 Real RGBD captured on the render thread at the `WorldRenderEvents.END_MAIN` seam — after

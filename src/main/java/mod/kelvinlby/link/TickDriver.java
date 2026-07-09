@@ -26,18 +26,21 @@ public final class TickDriver {
 		if (player == null || mc.world == null) {
 			return; // not in a world; nothing to report
 		}
-		bridge.get().publish(buildSnapshot(player));
+		bridge.get().publish(buildSnapshot(mc, player));
 	}
 
-	private OutboundSnapshot buildSnapshot(ClientPlayerEntity player) {
+	private OutboundSnapshot buildSnapshot(MinecraftClient mc, ClientPlayerEntity player) {
 		// Vision is captured on the render thread and published on its own OCLV stream (see
-		// VisionCapture), so it never rides this per-tick snapshot.
+		// VisionCapture), so it never rides this per-tick snapshot. The inventory of the current screen is
+		// read here on the client tick thread (InventoryMapper touches live handler/slot state) and rides
+		// the OCLO snapshot as an immutable value.
 		return new OutboundSnapshot(
 				player.getYaw(),
 				player.getPitch(),
 				player.getInventory().getSelectedSlot(),
 				player.getHealth(),
 				player.getHungerManager().getFoodLevel(),
-				player.experienceLevel);
+				player.experienceLevel,
+				InventoryMapper.readInventory(mc));
 	}
 }
