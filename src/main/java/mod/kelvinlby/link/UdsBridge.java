@@ -147,9 +147,11 @@ public final class UdsBridge implements LinkBridge {
 		outbox.set(snapshot);
 	}
 
+	/** Tick thread: peek the latest instruction, or {@code null} if none has ever arrived. Non-destructive
+	 * — the driver holds the last instruction across ticks that don't bring a fresh one; see {@link InputDriver}. */
 	@Override
 	public InboundInstruction takeLatest() {
-		return inbox.getAndSet(null);
+		return inbox.get();
 	}
 
 	@Override

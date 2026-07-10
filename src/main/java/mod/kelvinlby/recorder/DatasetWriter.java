@@ -1,6 +1,11 @@
 package mod.kelvinlby.recorder;
 
 import mod.kelvinlby.OpenCrafterLink;
+import mod.kelvinlby.link.InventoryAction;
+import mod.kelvinlby.link.InventoryState;
+import mod.kelvinlby.link.SlotAddress;
+import mod.kelvinlby.link.SlotGroupState;
+import mod.kelvinlby.link.SlotInfo;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -12,6 +17,8 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Locale;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -162,13 +169,115 @@ public final class DatasetWriter {
 				.append(",\"slot\":").append(a.selectedSlot())
 				.append(",\"yaw\":").append(fmt(a.yaw()))
 				.append(",\"pitch\":").append(fmt(a.pitch()))
+				.append(",\"health\":").append(fmt(a.health()))
+				.append(",\"food\":").append(a.food())
+				.append(",\"xp_level\":").append(a.xpLevel())
 				.append(",\"near\":").append(fmt(v.near()))
 				.append(",\"far\":").append(fmt(v.far()))
 				.append(",\"frame_repeated\":").append(s.frameRepeated())
 				.append(",\"frame_present\":").append(sizeOk)
-				.append('}')
-				.append('\n');
+				.append(",\"inventory\":");
+		appendInventory(sb, a.inventoryActions());
+		sb.append(",\"inventory_state\":");
+		appendInventoryState(sb, s.inventory());
+		sb.append('}').append('\n');
 		actionsOut.write(sb.toString());
+	}
+
+	/**
+	 * Append the full inventory snapshot as a JSON array of groups, each
+	 * {@code {"group":"hotbar","registry_id":null,"slots":[{"item":"minecraft:dirt","count":3,"enabled":true}, …]}}.
+	 * {@code registry_id} is the container id for the extension group and {@code null} otherwise; an empty slot is
+	 * {@code {"item":null,"count":0,"enabled":true}}. Groups appear in canonical order and always include the
+	 * virtual cursor/discard groups, matching {@link InventoryMapper#readInventory}.
+	 */
+	private static void appendInventoryState(StringBuilder sb, InventoryState state) {
+		sb.append('[');
+		List<SlotGroupState> groups = (state == null) ? List.of() : state.groups();
+		for (int g = 0; g < groups.size(); g++) {
+			if (g > 0) {
+				sb.append(',');
+			}
+			SlotGroupState group = groups.get(g);
+			sb.append("{\"group\":\"").append(group.group().name().toLowerCase(Locale.ROOT)).append('"')
+					.append(",\"registry_id\":");
+			appendJsonString(sb, group.registryId());
+			sb.append(",\"slots\":[");
+			List<SlotInfo> slots = group.slots();
+			for (int i = 0; i < slots.size(); i++) {
+				if (i > 0) {
+					sb.append(',');
+				}
+				SlotInfo info = slots.get(i);
+				sb.append("{\"item\":");
+				appendJsonString(sb, info.item());
+				sb.append(",\"count\":").append(info.count())
+						.append(",\"enabled\":").append(info.enabled()).append('}');
+			}
+			sb.append("]}");
+		}
+		sb.append(']');
+	}
+
+	/** Append a JSON string literal (escaping {@code "} and {@code \}), or {@code null} for a null value. */
+	private static void appendJsonString(StringBuilder sb, String value) {
+		if (value == null) {
+			sb.append("null");
+			return;
+		}
+		sb.append('"');
+		for (int i = 0; i < value.length(); i++) {
+			char c = value.charAt(i);
+			if (c == '"' || c == '\\') {
+				sb.append('\\');
+			}
+			sb.append(c);
+		}
+		sb.append('"');
+	}
+
+	/** Append the sample's inventory actions as a JSON array (empty when there were none this period). */
+	private static void appendInventory(StringBuilder sb, List<InventoryAction> actions) {
+		sb.append('[');
+		for (int i = 0; i < actions.size(); i++) {
+			if (i > 0) {
+				sb.append(',');
+			}
+			appendAction(sb, actions.get(i));
+		}
+		sb.append(']');
+	}
+
+	/**
+	 * Append one inventory action: its op plus the operands the op uses — {@code a} for the single/dual ops,
+	 * {@code b} only for {@code SWAP}, {@code slots} only for {@code DISTRIBUTE}. Unused operands are
+	 * {@code null}/{@code []} so every element has the same shape.
+	 */
+	private static void appendAction(StringBuilder sb, InventoryAction action) {
+		sb.append("{\"op\":\"").append(action.op().name().toLowerCase(Locale.ROOT)).append('"')
+				.append(",\"a\":");
+		appendAddress(sb, action.a());
+		sb.append(",\"b\":");
+		appendAddress(sb, action.b());
+		sb.append(",\"slots\":[");
+		List<SlotAddress> slots = action.slots();
+		for (int i = 0; i < slots.size(); i++) {
+			if (i > 0) {
+				sb.append(',');
+			}
+			appendAddress(sb, slots.get(i));
+		}
+		sb.append("]}");
+	}
+
+	/** Append a slot address as {@code {"group":"hotbar","index":3}}, or {@code null} if absent. */
+	private static void appendAddress(StringBuilder sb, SlotAddress addr) {
+		if (addr == null) {
+			sb.append("null");
+			return;
+		}
+		sb.append("{\"group\":\"").append(addr.group().name().toLowerCase(Locale.ROOT)).append('"')
+				.append(",\"index\":").append(addr.index()).append('}');
 	}
 
 	/**
@@ -200,7 +309,7 @@ public final class DatasetWriter {
 		boolean hasVideo = rgbEncoder != null;
 		String codec = (video.codec() == FfmpegEncoder.Codec.H265) ? "hevc" : "h264";
 		String json = "{\n"
-				+ "  \"schema_version\": 3,\n"
+				+ "  \"schema_version\": 5,\n"
 				+ "  \"start_epoch_ms\": " + startEpochMs + ",\n"
 				+ "  \"sample_hz\": " + fps + ",\n"
 				+ "  \"width\": " + width + ",\n"
@@ -211,9 +320,12 @@ public final class DatasetWriter {
 				+ "  \"depth\": \"depth.png.zip\",\n"
 				+ "  \"depth_format\": \"zip of 16-bit grayscale PNG per frame (000000.png..), top-left origin, value = round(distance/far * 65535); recover blocks as value/65535*far\",\n"
 				+ "  \"actions\": \"actions.jsonl\",\n"
+				+ "  \"inventory_format\": \"each actions.jsonl line has an 'inventory' array of {op, a, b, slots}: op is move/pick/put/swap/drop/distribute/collect; a and b are {group, index} slot addresses (b only for swap, where a is the hotbar/off-hand slot and b the hovered slot); slots is the target list for distribute; unused operands are null/[]\",\n"
+				+ "  \"inventory_state_format\": \"each actions.jsonl line has an 'inventory_state' array of groups {group, registry_id, slots[]}: group is hotbar/offhand/armor/inventory/cursor/discard or 'extension'; registry_id is the container id for the extension group (else null); each slot is {item, count, enabled} with item a registry id or null when empty. This is the observed screen contents that tick (matches the live link's outbound inventory)\",\n"
 				+ "  \"samples\": " + samples + ",\n"
 				+ "  \"dropped\": " + dropped + ",\n"
-				+ "  \"repeated\": " + repeated + "\n"
+				+ "  \"repeated\": " + repeated + ",\n"
+				+ "  \"inventory_actions_dropped\": " + InventoryActionTap.droppedCount() + "\n"
 				+ "}\n";
 		try {
 			Files.writeString(dir.resolve("manifest.json"), json, StandardCharsets.UTF_8);

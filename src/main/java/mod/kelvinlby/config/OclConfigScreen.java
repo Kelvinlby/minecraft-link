@@ -58,6 +58,21 @@ public final class OclConfigScreen {
 								.binding(defaults.udsDir, () -> cfg.udsDir, v -> cfg.udsDir = v)
 								.controller(StringControllerBuilder::create)
 								.build())
+						.option(Option.<Integer>createBuilder()
+								.name(Text.literal("Input staleness"))
+								.description(OptionDescription.of(Text.literal(
+										"How many consecutive ticks to keep holding the last movement command "
+												+ "after the controller stops sending fresh ones, before releasing all "
+												+ "keys. The controller's send loop and the game's tick loop run on "
+												+ "independent clocks, so a small grace window here prevents a held key "
+												+ "(e.g. walking forward) from stuttering on/off. Too high delays release "
+												+ "when the controller actually disconnects.")))
+								.binding(defaults.inputStalenessTicks, () -> cfg.inputStalenessTicks, v -> cfg.inputStalenessTicks = v)
+								.controller(opt -> IntegerSliderControllerBuilder.create(opt)
+										.range(1, 20)
+										.step(1)
+										.formatValue(v -> Text.literal(v + " ticks")))
+								.build())
 						.build())
 				// ---- Tab: Sensors ----
 				.category(ConfigCategory.createBuilder()
@@ -128,6 +143,18 @@ public final class OclConfigScreen {
 										+ "while in a world starts/stops a session when you save. Frames are recorded "
 										+ "at the camera resolution set on the Sensors tab.")))
 						.binding(defaults.recordDataset, () -> cfg.recordDataset, v -> cfg.recordDataset = v)
+						.controller(TickBoxControllerBuilder::create)
+						.build())
+				.option(Option.<Boolean>createBuilder()
+						.name(Text.literal("Disable recipe book while recording"))
+						.description(OptionDescription.of(Text.literal(
+								"While recording, grey out the recipe-book button on the inventory (2×2) and "
+										+ "crafting-table screens and close the book if open, so crafting is done by "
+										+ "manually placing item stacks. A recipe-book click auto-fills the grid as a "
+										+ "single action, which pollutes the dataset. On by default.")))
+						.binding(defaults.disableRecipeBookWhileRecording,
+								() -> cfg.disableRecipeBookWhileRecording,
+								v -> cfg.disableRecipeBookWhileRecording = v)
 						.controller(TickBoxControllerBuilder::create)
 						.build())
 				.option(Option.<Integer>createBuilder()

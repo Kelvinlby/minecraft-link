@@ -7,8 +7,11 @@ accessWidener v2 named
 # raw GL name.
 accessible field net/minecraft/client/gl/GlGpuBuffer id I
 
-# AI control simulates keypresses by writing KeyBinding held state directly. The public setter
-# KeyBinding.setPressed is overridden by StickyKeyBinding (sneak/sprint/attack/use) to TOGGLE when the
-# user's toggle option is on, which would flip a held key on/off every tick. Writing the raw `pressed`
-# field bypasses that toggle path so a driven key behaves as a true hold regardless of toggle settings.
+# AI control drives KeyBinding the same way a real key event does: setPressed(bool) on the press/release
+# edge (so StickyKeyBinding's toggle-on-press-edge behaviour fires exactly once, same as a human tap),
+# plus timesPressed++ on the press edge so KeyBinding.wasPressed() - the edge-triggered queue that
+# doAttack()/doItemUse()/doItemPick() poll in MinecraftClient.handleInputEvents() - sees the click.
+# Never held-polled every tick; only mutated on genuine state transitions, so this is indistinguishable
+# from vanilla input downstream.
 accessible field net/minecraft/client/option/KeyBinding pressed Z
+accessible field net/minecraft/client/option/KeyBinding timesPressed I

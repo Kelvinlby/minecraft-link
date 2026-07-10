@@ -1,5 +1,7 @@
 package mod.kelvinlby.recorder;
 
+import mod.kelvinlby.link.InventoryMapper;
+import mod.kelvinlby.link.InventoryState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.option.GameOptions;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -33,6 +35,15 @@ public final class ActionReader {
 	/** Latest observed action state. Client tick thread writes; sampler thread reads. */
 	private final AtomicReference<ActionSet> latest = new AtomicReference<>(ActionSet.NEUTRAL);
 
+	/**
+	 * Latest observed inventory contents (the current screen's slots + cursor), read from live
+	 * {@code ScreenHandler} state on the client tick thread and published for the sampler thread. This is
+	 * an <em>observation</em> (like the RGBD frame), not an action, so it rides the {@link Sample} rather
+	 * than the {@link ActionSet}. Reuses the same {@link InventoryMapper#readInventory} the live link uses
+	 * for its outbound telemetry, so the recorded snapshot matches what the engine sees.
+	 */
+	private final AtomicReference<InventoryState> latestInventory = new AtomicReference<>(InventoryState.EMPTY);
+
 	/** Client tick: snapshot the human's current input into the holder. No-op when out of world. */
 	public void onClientTick(MinecraftClient mc) {
 		ClientPlayerEntity player = mc.player;
@@ -40,6 +51,7 @@ public final class ActionReader {
 			return; // keep the last value; the sampler will repeat it (marked as a repeat by no fresh frame)
 		}
 		latest.set(read(mc.options, player));
+		latestInventory.set(InventoryMapper.readInventory(mc));
 	}
 
 	/** The most recently observed action state (never null; starts at {@link ActionSet#NEUTRAL}). */
@@ -47,7 +59,14 @@ public final class ActionReader {
 		return latest.get();
 	}
 
+	/** The most recently observed inventory contents (never null; starts at {@link InventoryState#EMPTY}). */
+	public InventoryState currentInventory() {
+		return latestInventory.get();
+	}
+
 	private static ActionSet read(GameOptions opts, ClientPlayerEntity player) {
+		// Inventory actions are edge events captured by InventoryActionTap, not polled here; the sampler
+		// attaches the ones drained for each period. This per-tick read carries the empty list.
 		return new ActionSet(
 				opts.forwardKey.pressed,
 				opts.backKey.pressed,
@@ -60,6 +79,10 @@ public final class ActionReader {
 				opts.useKey.pressed,
 				player.getInventory().getSelectedSlot(),
 				player.getYaw(),
-				player.getPitch());
+				player.getPitch(),
+				player.getHealth(),
+				player.getHungerManager().getFoodLevel(),
+				player.experienceLevel,
+				java.util.List.of());
 	}
 }

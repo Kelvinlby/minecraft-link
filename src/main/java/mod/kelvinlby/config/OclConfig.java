@@ -64,6 +64,15 @@ public class OclConfig {
 	 */
 	public String udsDir = "";
 
+	/**
+	 * How many consecutive ticks {@link mod.kelvinlby.link.InputDriver} keeps holding the last received
+	 * movement instruction after the controller stops sending fresh ones, before treating it as genuine
+	 * silence and releasing all driven keys. The controller's send loop and the client tick loop are
+	 * independent clocks, so a small grace window absorbs normal jitter without producing a stutter on
+	 * an otherwise-continuous key hold.
+	 */
+	public int inputStalenessTicks = 5;
+
 	// --- Sensors / Camera ---
 	/** Height, in pixels, of the camera frames sent to the controller. */
 	public int cameraHeight = 432;
@@ -80,6 +89,13 @@ public class OclConfig {
 	public boolean recordDataset = false;
 	/** Recorder sample rate in Hz (aligned RGBD-frame + action-set samples per second). Default = one per vanilla tick. */
 	public int recordSampleHz = 20;
+	/**
+	 * While a recording session is active, disable the recipe-book button on the 2×2 inventory and
+	 * crafting-table screens and force the book closed, so crafting must be done by manually placing
+	 * item stacks (a recipe-book click auto-fills the grid as one opaque action, polluting the dataset).
+	 * On by default. Read live each frame by {@code RecipeBookScreenMixin} — no restart needed to change.
+	 */
+	public boolean disableRecipeBookWhileRecording = true;
 
 	// --- Recording / video encoding (rgb.mp4 via a system-installed ffmpeg; see FfmpegEncoder) ---
 	/** Encoder family: AUTO tries the GPU encoders first then falls back to CPU x264/x265. */

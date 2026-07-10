@@ -20,7 +20,12 @@ public interface LinkBridge {
 	/** Tick thread: hand off the latest telemetry. O(1), non-blocking, conflating (newest wins). */
 	void publish(OutboundSnapshot snapshot);
 
-	/** Tick thread: consume-and-clear the latest movement instruction, or {@code null} if none arrived. */
+	/**
+	 * Tick thread: peek the latest movement instruction, or {@code null} if none has ever arrived.
+	 * Non-destructive — the same instruction is returned on every tick until a newer one replaces it in
+	 * the conflating slot. {@link mod.kelvinlby.link.InputDriver} is responsible for tracking staleness
+	 * (holding the last instruction across a bounded number of ticks without a fresh one, then releasing).
+	 */
 	InboundInstruction takeLatest();
 
 	/**

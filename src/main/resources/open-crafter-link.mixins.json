@@ -1,0 +1,14 @@
+{
+	"required": true,
+	"minVersion": "0.8",
+	"package": "mod.kelvinlby.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"client": [
+		"ClientPlayerEntityMixin",
+		"ClientPlayerInteractionManagerMixin",
+		"RecipeBookScreenMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

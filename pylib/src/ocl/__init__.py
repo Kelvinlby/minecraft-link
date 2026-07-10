@@ -915,6 +915,96 @@ def depth_zip_to_blocks(u16: "np.ndarray", far: float) -> "np.ndarray":
     return u16.astype(np.float32) / 65535.0 * far
 
 
+# Map the recorder's lowercase op names (Java InventoryAction.Op.name().toLowerCase()) to OP_* opcodes.
+_ACTION_OP_IDS = {
+    "none": OP_NONE, "move": OP_MOVE, "pick": OP_PICK, "put": OP_PUT,
+    "swap": OP_SWAP, "drop": OP_DROP, "distribute": OP_DISTRIBUTE, "collect": OP_COLLECT,
+}
+
+
+@dataclass(frozen=True)
+class ActionSlot:
+    """A recorded slot address: a group (name + G_* opcode) and its group-local index. `group` is None
+    for a group name outside the fixed set (an extension/container id), in which case `op` is None too."""
+
+    name: str
+    op: Optional[int]
+    index: int
+
+
+@dataclass(frozen=True)
+class InventoryEvent:
+    """One recorded inventory action from an ``actions.jsonl`` sample's ``inventory`` array. `op` is an
+    OP_* opcode; `op_name` its lowercase name. `a` is the primary slot (None for ops with no slot); `b`
+    is the second slot, present only for ``swap`` (where `a` is the hotbar/off-hand slot and `b` the
+    hovered slot); `slots` is the target list, non-empty only for ``distribute``."""
+
+    op: int
+    op_name: str
+    a: Optional[ActionSlot]
+    b: Optional[ActionSlot]
+    slots: tuple  # tuple[ActionSlot, ...]
+
+
+def _action_slot(obj) -> Optional[ActionSlot]:
+    if obj is None:
+        return None
+    name = obj["group"]
+    return ActionSlot(name=name, op=GROUP_IDS.get(name), index=int(obj["index"]))
+
+
+def _inventory_event(obj) -> InventoryEvent:
+    op_name = obj["op"]
+    return InventoryEvent(
+        op=_ACTION_OP_IDS.get(op_name, OP_NONE),
+        op_name=op_name,
+        a=_action_slot(obj.get("a")),
+        b=_action_slot(obj.get("b")),
+        slots=tuple(_action_slot(s) for s in obj.get("slots", ())),
+    )
+
+
+def _inventory_group(obj) -> SlotGroupData:
+    """Decode one recorded 'inventory_state' group into the same SlotGroupData the live controller uses."""
+    name = obj["group"]
+    slots = tuple(
+        Slot(item=s.get("item"), count=int(s.get("count", 0)), enabled=bool(s.get("enabled", True)))
+        for s in obj.get("slots", ())
+    )
+    # For the fixed groups the recorder writes the canonical name; extension groups carry a registry id.
+    group_op = GROUP_IDS.get(name, G_EXTENSION)
+    display = name if group_op != G_EXTENSION else (obj.get("registry_id") or name)
+    return SlotGroupData(group=group_op, name=display, slots=slots)
+
+
+def read_actions_jsonl(path: str) -> Iterator[dict]:
+    """Yield each sample of a recorder ``actions.jsonl``, one dict per line, in recorded order.
+
+    Every scalar field (``seqno``, ``t_ns``, movement/look, ``slot``, ``near``/``far``,
+    ``frame_repeated``/``frame_present``) is passed through as-is. The ``inventory`` array
+    (dataset ``schema_version`` >= 4) is decoded into a list of :class:`InventoryEvent` under the
+    ``inventory`` key, so each event's ``op`` lines up with the OP_* constants used by the live
+    controller (``move``/``pick``/``put``/``swap``/``drop``/``distribute``/``collect``). The
+    ``inventory_state`` object (``schema_version`` >= 5) — the observed screen contents that tick — is
+    decoded into an :class:`Inventory` (same type the live controller returns), so you can query it with
+    ``.by_name("hotbar")`` / ``.group(G_HOTBAR)``. Older files missing either field yield an empty list /
+    empty :class:`Inventory`. Pure stdlib (``json``); no extra deps.
+    """
+    import json
+
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            row["inventory"] = [_inventory_event(e) for e in row.get("inventory", ())]
+            row["inventory_state"] = Inventory(
+                groups=tuple(_inventory_group(g) for g in row.get("inventory_state", ()))
+            )
+            yield row
+
+
 def frame_to_pointcloud(frame: VisionFrame, depth_scale: float = 0.0):
     """Build an extruded image-plane point cloud from an RGBD frame.
 

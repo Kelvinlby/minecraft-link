@@ -1,6 +1,8 @@
 package mod.kelvinlby.link;
 
+import mod.kelvinlby.config.OclConfig;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ingame.InventoryScreen;
 import net.minecraft.client.network.ClientPlayerInteractionManager;
 import net.minecraft.client.option.GameOptions;
 import net.minecraft.client.option.KeyBinding;
@@ -20,23 +22,33 @@ import java.util.function.Supplier;
  * place for both attack/use handling and movement physics within the <em>same</em> tick.
  *
  * <p>This is the most vanilla way to control the player: instead of poking {@code playerInput} or
- * calling the private attack/use methods directly, we set the held state of the bindings the game
- * already polls every tick and let all of vanilla's downstream logic decide hold-vs-click. In
- * particular, a held attack key drives continuous block-breaking via
- * {@code MinecraftClient.handleBlockBreaking(... attackKey.isPressed() ...)} — exactly like a human
- * holding the mouse button — rather than one discrete swing per tick.
+ * calling the private attack/use methods directly, we drive the real {@link KeyBinding}s the game
+ * already polls every tick, firing a press/release edge exactly where a human key event would and
+ * letting all of vanilla's downstream logic decide hold-vs-click from there. A held attack key drives
+ * continuous block-breaking via {@code MinecraftClient.handleBlockBreaking(... attackKey.isPressed()
+ * ...)}; a single press/release edge queues one {@code KeyBinding.wasPressed()} — polled by
+ * {@code doAttack}/{@code doItemUse}/{@code doItemPick} — so a discrete click still swings/uses once,
+ * exactly like a human tap. See {@link #applyEdge} for the edge-detection itself.
  *
- * <h2>Why the raw {@code pressed} field</h2>
+ * <h2>Why edge-triggered, not level-polled</h2>
  * Sneak, sprint, attack and use are {@code StickyKeyBinding}s whose {@code setPressed(true)}
- * <em>toggles</em> when the user's toggle option is on, which would flip a held key on/off each tick.
- * Writing the underlying {@code pressed} flag directly (made accessible via the access widener)
- * bypasses that toggle path so every driven key behaves as a true hold regardless of toggle settings.
+ * <em>toggles</em> when the user's toggle option is on — calling it every tick while held would flip
+ * the key on/off each tick. Bindings also only queue a click for {@code wasPressed()} via
+ * {@code timesPressed}, which real input increments once per key-down, never while held. Comparing each
+ * instruction's booleans against the previously-applied state and touching the binding only on an
+ * actual transition (via the access-widened {@code pressed}/{@code timesPressed} fields) reproduces
+ * both behaviours for free, instead of intercepting or bypassing vanilla's click/hold logic.
  *
  * <h2>Takeover policy</h2>
- * The mod drives keys only while instructions flow. When the controller goes silent the keys the mod
- * was holding are released exactly once and ownership is dropped, after which the keyboard is left
- * untouched so a human can play manually. Rotation and slot are absolute and applied here too;
- * telemetry is published separately at end-of-tick by {@link TickDriver}.
+ * The mod drives keys only while instructions flow. Because the controller's send loop and the client
+ * tick loop are independent, unsynchronized clocks, a tick can easily elapse with no <em>fresh</em>
+ * instruction even while the controller is continuously holding a key — so the last known instruction
+ * is re-applied (held) across such ticks rather than being treated as a release. Only once
+ * {@link OclConfig#inputStalenessTicks} consecutive ticks pass without a fresh instruction is the
+ * controller considered genuinely silent: the keys the mod was holding are released once and ownership
+ * is dropped, after which the keyboard is left untouched so a human can play manually. Rotation and
+ * slot are absolute and applied here too; telemetry is published separately at end-of-tick by
+ * {@link TickDriver}.
  */
 public final class InputDriver {
 	/** Resolved live each tick so a bridge swap (settings save -&gt; reloadLink) doesn't orphan input. */
@@ -44,6 +56,20 @@ public final class InputDriver {
 
 	/** Whether the mod is currently holding any driven key, so it can release them once on silence. */
 	private boolean owningKeys;
+
+	/** Most recent instruction (fresh or held-over), or {@code null} if none has arrived since world entry. */
+	private InboundInstruction lastInstr;
+
+	/** Consecutive ticks since {@link #lastInstr} was last replaced by a genuinely new instruction. */
+	private int missedTicks;
+
+	/**
+	 * Held state we last applied to each driven binding, so {@link #stampMovement} can fire a real
+	 * press/release edge only on a genuine transition rather than re-pressing every tick. Starts all
+	 * {@code false}, matching a freshly-joined world where nothing is held.
+	 */
+	private boolean frontHeld, backHeld, leftHeld, rightHeld, jumpHeld, sneakHeld, sprintHeld,
+			attackHeld, interactHeld;
 
 	public InputDriver(Supplier<LinkBridge> bridge) {
 		this.bridge = bridge;
@@ -53,22 +79,48 @@ public final class InputDriver {
 		ClientPlayerEntity player = mc.player;
 		if (player == null || mc.world == null) {
 			owningKeys = false; // left the world; nothing held to release
+			lastInstr = null;
+			missedTicks = 0;
+			// Vanilla resets every KeyBinding on world leave (KeyBinding.unpressAll), so our shadow of
+			// "what's currently held" must reset too, or a rejoin would see a false hold and skip the
+			// press edge for a binding that was still down when the world was left.
+			frontHeld = backHeld = leftHeld = rightHeld = jumpHeld = sneakHeld = sprintHeld
+					= attackHeld = interactHeld = false;
 			return;
 		}
 
 		LinkBridge bridge = this.bridge.get();
-		InboundInstruction in = bridge.takeLatest();
-		if (in == null) {
-			// No fresh movement: release once if we were driving, then go hands-off so a human can play.
-			if (owningKeys) {
-				stampMovement(mc.options, InboundInstruction.NEUTRAL);
-				owningKeys = false;
+		InboundInstruction fresh = bridge.takeLatest(); // non-destructive peek; same value until replaced
+		if (fresh != null && fresh != lastInstr) {
+			lastInstr = fresh;
+			missedTicks = 0;
+		} else if (lastInstr != null) {
+			missedTicks++;
+		}
+
+		int limit = OclConfig.get().inputStalenessTicks;
+		if (lastInstr != null && missedTicks <= limit) {
+			// A non-inventory command that actually changes driven state must reach vanilla's
+			// movement/look/attack handling, which is gated off while any Screen is open. Close it out
+			// (exactly like a human pressing Escape) before driving keys, rather than silently
+			// swallowing the command — but only when there's a real change to apply, so a screen the
+			// controller left open on purpose isn't closed by an instruction that's a no-op repeat.
+			if (mc.currentScreen != null && changesState(player, lastInstr)) {
+				while (mc.currentScreen != null) {
+					mc.currentScreen.close(); // Screen#close(), overridden by HandledScreen to send the
+					// close-container packet — the same call vanilla's Escape key makes.
+				}
 			}
-		} else {
-			stampMovement(mc.options, in);
+			// Fresh this tick, or held over within the staleness grace window: keep driving.
+			stampMovement(mc.options, lastInstr);
 			owningKeys = true;
-			applyRotation(player, in);
-			applySlot(player, in);
+			applyRotation(player, lastInstr);
+			applySlot(player, lastInstr);
+		} else if (owningKeys) {
+			// Genuinely silent past the grace window: release once, then go hands-off.
+			stampMovement(mc.options, InboundInstruction.NEUTRAL);
+			owningKeys = false;
+			lastInstr = null;
 		}
 
 		// Inventory actions ride the same OCLI stream but are delivered on a separate non-conflating queue,
@@ -78,6 +130,34 @@ public final class InputDriver {
 		while ((action = bridge.takeAction()) != null && action.op() != InventoryAction.Op.NONE) {
 			executeAction(mc, player, action);
 		}
+	}
+
+	/** Rotation deltas at or below this many degrees are camera jitter, not an intentional look command. */
+	private static final float ROTATION_CLOSE_THRESHOLD_DEGREES = 1.0f;
+
+	/**
+	 * Whether applying {@code in} this tick is an intentional movement/look command that should close an
+	 * open screen: a WASD or sneak/jump edge, or a rotation more than {@link
+	 * #ROTATION_CLOSE_THRESHOLD_DEGREES} away from the player's current facing. Deliberately excludes
+	 * sprint/attack/interact edges and hotbar slot changes — those don't need the screen gone to take
+	 * effect meaningfully — and excludes small rotation deltas, since a live camera feed is essentially
+	 * always reporting a slightly different angle tick to tick even when the controller isn't trying to
+	 * look away from a menu.
+	 */
+	private boolean changesState(ClientPlayerEntity player, InboundInstruction in) {
+		if (in.front() != frontHeld || in.back() != backHeld || in.left() != leftHeld
+				|| in.right() != rightHeld || in.jump() != jumpHeld || in.sneak() != sneakHeld) {
+			return true;
+		}
+		if (in.hasRotation()) {
+			float yawDelta = MathHelper.wrapDegrees(in.yaw() - player.getYaw());
+			float pitchDelta = in.pitch() - player.getPitch();
+			if (Math.abs(yawDelta) > ROTATION_CLOSE_THRESHOLD_DEGREES
+					|| Math.abs(pitchDelta) > ROTATION_CLOSE_THRESHOLD_DEGREES) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -140,13 +220,20 @@ public final class InputDriver {
 				}
 			}
 			case DROP -> {
-				if (mc.currentScreen == null) {
-					// No screen: exactly the vanilla drop key — drop one item from the selected hotbar stack,
-					// regardless of the addressed slot (matches MinecraftClient's dropKey handling).
+				boolean isSelectedHotbar = action.a() != null && action.a().group() == SlotGroup.HOTBAR
+						&& action.a().index() == player.getInventory().getSelectedSlot();
+				if (mc.currentScreen == null && isSelectedHotbar) {
+					// No screen, addressing the selected hotbar slot: exactly the vanilla drop key.
 					player.dropSelectedItem(false);
 				} else {
-					// Screen open: drop one item from the addressed slot — the vanilla Q-on-hovered-slot path
-					// (HandledScreen.keyPressed -> clickSlot THROW, button 0 = single item).
+					// Any other addressed slot needs a THROW click on that slot id, which requires the
+					// inventory screen to be open (matches the vanilla Q-on-hovered-slot path:
+					// HandledScreen.keyPressed -> clickSlot THROW, button 0 = single item). Open it here if
+					// it isn't already showing; the changesState-gated rule in onStartClientTick will close
+					// it again once a real movement/look command arrives.
+					if (mc.currentScreen == null) {
+						mc.setScreen(new InventoryScreen(player));
+					}
 					if (action.a() != null && action.a().group() != SlotGroup.DISCARD
 							&& action.a().group() != SlotGroup.CURSOR) {
 						int slotId = InventoryMapper.resolveSlotId(player, action.a());
@@ -229,18 +316,42 @@ public final class InputDriver {
 				ScreenHandler.packQuickCraftData(2, button), SlotActionType.QUICK_CRAFT, player); // end -> apply
 	}
 
-	/** Set the held state of every driven binding to the instruction's value (released for NEUTRAL). */
+	/**
+	 * Apply the instruction's held state to every driven binding as a real press/release edge, exactly
+	 * like a human key event: unchanged-since-last-tick stays a hold (no-op), and only a transition
+	 * calls {@code setPressed} + (on the press edge) bumps {@code timesPressed}. This is what makes the
+	 * distinction between a discrete click and a sustained hold fall out of vanilla logic for free —
+	 * {@code KeyBinding.wasPressed()} (polled by {@code doAttack}/{@code doItemUse}/{@code doItemPick})
+	 * only ever fires on that edge, and {@code StickyKeyBinding.setPressed} only toggles correctly when
+	 * called once per edge rather than every tick.
+	 */
 	private void stampMovement(GameOptions opts, InboundInstruction in) {
-		opts.forwardKey.pressed = in.front();
-		opts.backKey.pressed = in.back();
-		opts.leftKey.pressed = in.left();
-		opts.rightKey.pressed = in.right();
-		opts.jumpKey.pressed = in.jump();
-		opts.sneakKey.pressed = in.sneak();
-		opts.sprintKey.pressed = in.sprint();
-		// Held attack/use: a sustained press drives continuous breaking / item use downstream.
-		opts.attackKey.pressed = in.attack();
-		opts.useKey.pressed = in.interact();
+		frontHeld = applyEdge(opts.forwardKey, frontHeld, in.front());
+		backHeld = applyEdge(opts.backKey, backHeld, in.back());
+		leftHeld = applyEdge(opts.leftKey, leftHeld, in.left());
+		rightHeld = applyEdge(opts.rightKey, rightHeld, in.right());
+		jumpHeld = applyEdge(opts.jumpKey, jumpHeld, in.jump());
+		sneakHeld = applyEdge(opts.sneakKey, sneakHeld, in.sneak());
+		sprintHeld = applyEdge(opts.sprintKey, sprintHeld, in.sprint());
+		attackHeld = applyEdge(opts.attackKey, attackHeld, in.attack());
+		interactHeld = applyEdge(opts.useKey, interactHeld, in.interact());
+	}
+
+	/**
+	 * Drive one binding to {@code wantPressed}, firing a press/release edge only when it differs from
+	 * {@code wasHeld}. On the release-&gt;press edge this also increments the raw {@code timesPressed}
+	 * queue, mirroring what {@code Keyboard}/{@code Mouse} do for a real key-down before calling
+	 * {@code setPressed} — so a single controller click reads as a single {@code wasPressed()} exactly
+	 * once, while a sustained hold keeps {@code isPressed()} true without re-queuing clicks.
+	 */
+	private boolean applyEdge(KeyBinding key, boolean wasHeld, boolean wantPressed) {
+		if (wantPressed != wasHeld) {
+			if (wantPressed) {
+				key.timesPressed++;
+			}
+			key.setPressed(wantPressed);
+		}
+		return wantPressed;
 	}
 
 	/** Set absolute rotation only when the controller sent a fresh value; clamp pitch to [-90, 90]. */

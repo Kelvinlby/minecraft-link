@@ -8,6 +8,7 @@ import net.minecraft.registry.Registries;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.ScreenHandlerType;
 import net.minecraft.screen.slot.Slot;
+import net.minecraft.screen.slot.SlotActionType;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -171,6 +172,95 @@ public final class InventoryMapper {
 			return -1;
 		}
 		return addr.index();
+	}
+
+	// ------------------------------------------------------------------ //
+	// reverse mapping (vanilla click -> InventoryAction), for recording   //
+	// ------------------------------------------------------------------ //
+
+	/** Vanilla {@code SWAP} button id that swaps the hovered slot with the off-hand instead of a hotbar slot. */
+	public static final int OFFHAND_SWAP_BUTTON = 40;
+
+	/**
+	 * Inverse of {@link #resolveSlotId}: turn a vanilla {@code slot.id} clicked in the player's current screen
+	 * back into a stable {@link SlotAddress}, reusing the same {@link #classify} pass so the two directions can
+	 * never disagree. {@code slotId == }{@link ScreenHandler#EMPTY_SPACE_SLOT_INDEX} (-999, a click outside the
+	 * GUI) maps to {@link SlotGroup#DISCARD}. Returns {@code null} if the id is not a slot in the current screen
+	 * (or there is no player). Runs on the client tick thread — see the class threading note.
+	 */
+	public static SlotAddress addressOf(PlayerEntity player, int slotId) {
+		if (slotId == ScreenHandler.EMPTY_SPACE_SLOT_INDEX) {
+			return new SlotAddress(SlotGroup.DISCARD, 0);
+		}
+		Classification c = classify(player);
+		if (c == null) {
+			return null;
+		}
+		for (Map.Entry<SlotGroup, List<Slot>> e : c.groups().entrySet()) {
+			List<Slot> slots = e.getValue();
+			for (int i = 0; i < slots.size(); i++) {
+				Slot slot = slots.get(i);
+				if (slot != null && slot.id == slotId) {
+					return new SlotAddress(e.getKey(), i);
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Map a single <em>stateless</em> vanilla slot click — the exact {@code (slotId, button, actionType)} passed
+	 * to {@code ClientPlayerInteractionManager.clickSlot} — to the {@link InventoryAction} that would reproduce
+	 * it, for the dataset recorder. This is the inverse of {@link InputDriver}'s drive path.
+	 *
+	 * <p>Handles the clicks that map to exactly one action: {@code QUICK_MOVE}&rarr;{@link InventoryAction.Op#MOVE},
+	 * {@code PICKUP} button 0/1&rarr;{@link InventoryAction.Op#PICK}/{@link InventoryAction.Op#PUT},
+	 * {@code SWAP}&rarr;{@link InventoryAction.Op#SWAP} (hotbar/off-hand vs. the hovered slot),
+	 * {@code THROW}&rarr;{@link InventoryAction.Op#DROP}, and {@code PICKUP_ALL}&rarr;{@link InventoryAction.Op#COLLECT}
+	 * (the double-click sweep). The multi-call sequences ({@code QUICK_CRAFT} drags, and the {@code PICKUP} that
+	 * precedes a {@code PICKUP_ALL}) are reassembled by the caller ({@code InventoryActionTap}); {@code CLONE}
+	 * (creative middle-click) and anything unrecognized return {@link InventoryAction#NONE}.
+	 *
+	 * @return the mapped action, or {@link InventoryAction#NONE} if this click has no representable action
+	 */
+	public static InventoryAction classifyClick(PlayerEntity player, int slotId, int button, SlotActionType type) {
+		switch (type) {
+			case QUICK_MOVE -> {
+				SlotAddress a = addressOf(player, slotId);
+				return a == null ? InventoryAction.NONE : new InventoryAction(InventoryAction.Op.MOVE, a, null);
+			}
+			case PICKUP -> {
+				SlotAddress a = addressOf(player, slotId);
+				if (a == null) {
+					return InventoryAction.NONE;
+				}
+				InventoryAction.Op op = (button == 1) ? InventoryAction.Op.PUT : InventoryAction.Op.PICK;
+				return new InventoryAction(op, a, null);
+			}
+			case PICKUP_ALL -> {
+				SlotAddress a = addressOf(player, slotId);
+				return a == null ? InventoryAction.NONE : new InventoryAction(InventoryAction.Op.COLLECT, a, null);
+			}
+			case THROW -> {
+				SlotAddress a = addressOf(player, slotId);
+				return a == null ? InventoryAction.NONE : new InventoryAction(InventoryAction.Op.DROP, a, null);
+			}
+			case SWAP -> {
+				SlotAddress hovered = addressOf(player, slotId);
+				SlotAddress hotbar = (button == OFFHAND_SWAP_BUTTON)
+						? new SlotAddress(SlotGroup.OFFHAND, 0)
+						: (button >= 0 && button <= 8 ? new SlotAddress(SlotGroup.HOTBAR, button) : null);
+				if (hovered == null || hotbar == null) {
+					return InventoryAction.NONE;
+				}
+				// InventoryAction's convention (matching InputDriver.executeSwap): a = the hotbar/off-hand slot,
+				// b = the hovered slot.
+				return new InventoryAction(InventoryAction.Op.SWAP, hotbar, hovered);
+			}
+			default -> {
+				return InventoryAction.NONE; // CLONE, QUICK_CRAFT (handled by the tap), or unknown
+			}
+		}
 	}
 
 	// ------------------------------------------------------------------ //

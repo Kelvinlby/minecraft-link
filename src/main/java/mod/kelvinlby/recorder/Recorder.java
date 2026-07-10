@@ -98,10 +98,13 @@ public final class Recorder {
 		DatasetWriter writer = new DatasetWriter(dir, sampleHz, video);
 		Sampler s = new Sampler(sampleHz, actionReader, writer);
 		VisionTap.setActive(true); // bridges start publishing converted frames
+		InventoryActionTap.resetDropped();
+		InventoryActionTap.setActive(true); // the clickSlot mixin starts buffering slot clicks
 		try {
 			s.start();
 		} catch (IOException e) {
 			VisionTap.setActive(false);
+			InventoryActionTap.setActive(false);
 			OpenCrafterLink.LOGGER.error("[open-crafter-link] failed to start recording in {}", dir, e);
 			return;
 		}
@@ -116,6 +119,7 @@ public final class Recorder {
 	private void stopAsync() {
 		running = false;
 		VisionTap.setActive(false);
+		InventoryActionTap.setActive(false);
 		Sampler s = sampler;
 		sampler = null;
 		if (s == null) {
@@ -139,6 +143,7 @@ public final class Recorder {
 		synchronized (this) {
 			running = false;
 			VisionTap.setActive(false);
+			InventoryActionTap.setActive(false);
 			s = sampler;
 			sampler = null;
 			inFlight = finalizeThread;

@@ -1,8 +1,11 @@
 package mod.kelvinlby.recorder;
 
 import mod.kelvinlby.OpenCrafterLink;
+import mod.kelvinlby.link.InventoryAction;
 import mod.kelvinlby.link.VisionFrame;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -159,7 +162,17 @@ public final class Sampler {
 				continue;
 			}
 
-			Sample sample = new Sample(seq++, System.nanoTime(), frame, actions.current(), repeat);
+			// Attach the discrete slot clicks observed since the last tick — an edge stream drained
+			// non-conflatingly (see InventoryActionTap), unlike the polled movement/look state.
+			ActionSet action = actions.current();
+			List<InventoryAction> inv = new ArrayList<>(2);
+			InventoryActionTap.drainInto(inv);
+			if (!inv.isEmpty()) {
+				action = action.withInventoryActions(inv);
+			}
+
+			Sample sample = new Sample(seq++, System.nanoTime(), frame, action,
+					actions.currentInventory(), repeat);
 			if (queue.offer(sample)) {
 				if (repeat) {
 					repeated.incrementAndGet();
@@ -230,5 +243,5 @@ public final class Sampler {
 	}
 
 	/** Sentinel enqueued by {@link #stop} to make the writer drain-and-exit. */
-	private static final Sample POISON = new Sample(-1, -1, null, null, false);
+	private static final Sample POISON = new Sample(-1, -1, null, null, null, false);
 }
