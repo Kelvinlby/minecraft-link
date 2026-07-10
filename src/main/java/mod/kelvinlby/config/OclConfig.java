@@ -19,10 +19,10 @@ import java.nio.file.Path;
  * are public so the screen's getter/setter lambdas stay trivial.
  *
  * <p>The link transport is {@link #transport}: {@link Transport#UDS} (plain {@code AF_UNIX} domain sockets,
- * faster local-only — the default) or {@link Transport#TCP} (ZMQ over TCP, for a networked controller).
- * {@link #toEndpoints()}
- * converts these settings into the three ZMQ TCP endpoints; {@link #toUdsEndpoints()} into the three UDS
- * socket paths. The screen rebuilds whichever the chosen transport needs and restarts the bridge on save.
+ * faster local-only — the default) or {@link Transport#TCP} (plain TCP, for a networked controller).
+ * {@link #toEndpoints()} converts these settings into the TCP host + ports; {@link #toUdsEndpoints()} into
+ * the three UDS socket paths. The screen rebuilds whichever the chosen transport needs and restarts the
+ * bridge on save.
  *
  * <p>The camera resolution ({@link #cameraWidth}/{@link #cameraHeight}) drives the vision pipeline's
  * downsample target (see {@code OpenCrafterLinkClient} and {@code VisionCapture}); the
@@ -43,7 +43,7 @@ public class OclConfig {
 
 	/** Link transport. Gson serializes enums by name, so no extra persistence wiring is needed. */
 	public enum Transport {
-		/** ZeroMQ over TCP loopback — works across a network; requires JeroMQ (mod) and pyzmq (controller). */
+		/** Plain TCP (length-prefixed framing) — works across a network; no third-party deps either side. */
 		TCP,
 		/** Plain {@code AF_UNIX} domain sockets (length-prefixed framing) — the default; faster, same-machine only. */
 		UDS
@@ -54,7 +54,7 @@ public class OclConfig {
 	 * {@link Transport#TCP} for a networked controller. */
 	public Transport transport = Transport.UDS;
 
-	/** Base ZMQ TCP URL of the controller, host only (e.g. {@code tcp://127.0.0.1}); ports are canonical. Used only in TCP mode. */
+	/** Controller host for TCP mode, host only (e.g. {@code tcp://127.0.0.1} or {@code 127.0.0.1}); ports are canonical. Used only in TCP mode. */
 	public String tcpUrl = "tcp://127.0.0.1";
 
 	/**
@@ -147,16 +147,14 @@ public class OclConfig {
 	}
 
 	/**
-	 * Resolve the three ZMQ endpoints from this config. The mod BINDs its two PUB sockets on all
-	 * interfaces ({@code tcp://*:port}) and SUB-connects to the controller's host on the instruction
-	 * port. A set {@code ocl.*Endpoint} launch property overrides the corresponding derived endpoint.
+	 * Resolve the TCP endpoints from this config. The mod BINDs telemetry and vision on all interfaces
+	 * (canonical ports) and CONNECTs to the controller's host on the instruction port. The {@code
+	 * ocl.tcpHost} launch property overrides the configured host.
 	 */
-	public LinkConfig.Endpoints toEndpoints() {
-		String host = hostOf(tcpUrl);
-		String pub = firstNonNull(LinkConfig.PUB_ENDPOINT_OVERRIDE, "tcp://*:" + LinkConfig.TELEMETRY_PORT);
-		String sub = firstNonNull(LinkConfig.SUB_ENDPOINT_OVERRIDE, "tcp://" + host + ":" + LinkConfig.INSTRUCTION_PORT);
-		String visPub = firstNonNull(LinkConfig.VIS_PUB_ENDPOINT_OVERRIDE, "tcp://*:" + LinkConfig.VISION_PORT);
-		return new LinkConfig.Endpoints(pub, sub, visPub);
+	public LinkConfig.TcpEndpoints toEndpoints() {
+		String host = firstNonNull(LinkConfig.TCP_HOST_OVERRIDE, hostOf(tcpUrl));
+		return new LinkConfig.TcpEndpoints(
+				host, LinkConfig.TELEMETRY_PORT, LinkConfig.INSTRUCTION_PORT, LinkConfig.VISION_PORT);
 	}
 
 	/**

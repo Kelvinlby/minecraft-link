@@ -1,0 +1,112 @@
+{
+  "_comment": "Canonical wire-protocol fixtures — the human-readable authority for the golden round-trip tests. Each case's `bin` names a byte file in this directory that the Java reference encoder produced; the Java and Python test suites both assert their codec agrees with these values AND these bytes. Regenerate the .bin files with `./gradlew genGolden` (see protocol/README.md) after changing a fixture. Angles/floats use exact float32-representable values so byte comparison is stable across languages.",
+  "oclo": [
+    {
+      "name": "oclo_full",
+      "bin": "oclo_full.bin",
+      "yaw": 90.0,
+      "pitch": -45.0,
+      "slot": 3,
+      "health": 15.0,
+      "food": 17,
+      "xp_level": 42,
+      "inventory": [
+        {
+          "group": "HOTBAR",
+          "registry_id": "",
+          "slots": [
+            {"item": "minecraft:stone", "count": 64, "enabled": true},
+            {"item": null, "count": 0, "enabled": true},
+            {"item": "minecraft:diamond", "count": 1, "enabled": false}
+          ]
+        },
+        {
+          "group": "EXTENSION",
+          "registry_id": "minecraft:generic_9x3",
+          "slots": [
+            {"item": "minecraft:oak_planks", "count": 12, "enabled": true}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "oclo_empty",
+      "bin": "oclo_empty.bin",
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "slot": 0,
+      "health": 20.0,
+      "food": 20,
+      "xp_level": 0,
+      "inventory": []
+    }
+  ],
+  "ocli": [
+    {
+      "name": "ocli_move_only",
+      "bin": "ocli_move_only.bin",
+      "front": true, "back": false, "left": false, "right": true,
+      "jump": false, "sprint": true, "sneak": false,
+      "slot": -1, "attack": false, "interact": false,
+      "yaw": "NaN", "pitch": "NaN",
+      "op": "NONE", "a": null, "b": null, "slots": []
+    },
+    {
+      "name": "ocli_look_slot",
+      "bin": "ocli_look_slot.bin",
+      "front": false, "back": false, "left": false, "right": false,
+      "jump": false, "sprint": false, "sneak": false,
+      "slot": 5, "attack": true, "interact": false,
+      "yaw": 180.0, "pitch": 0.0,
+      "op": "NONE", "a": null, "b": null, "slots": []
+    },
+    {
+      "name": "ocli_pick",
+      "bin": "ocli_pick.bin",
+      "front": false, "back": false, "left": false, "right": false,
+      "jump": false, "sprint": false, "sneak": false,
+      "slot": -1, "attack": false, "interact": false,
+      "yaw": "NaN", "pitch": "NaN",
+      "op": "PICK", "a": {"group": "INVENTORY", "index": 7}, "b": null, "slots": []
+    },
+    {
+      "name": "ocli_swap",
+      "bin": "ocli_swap.bin",
+      "front": false, "back": false, "left": false, "right": false,
+      "jump": false, "sprint": false, "sneak": false,
+      "slot": -1, "attack": false, "interact": false,
+      "yaw": "NaN", "pitch": "NaN",
+      "op": "SWAP", "a": {"group": "HOTBAR", "index": 0}, "b": {"group": "EXTENSION", "index": 4}, "slots": []
+    },
+    {
+      "name": "ocli_distribute",
+      "bin": "ocli_distribute.bin",
+      "front": false, "back": false, "left": false, "right": false,
+      "jump": false, "sprint": false, "sneak": false,
+      "slot": -1, "attack": false, "interact": false,
+      "yaw": "NaN", "pitch": "NaN",
+      "op": "DISTRIBUTE", "a": null, "b": null,
+      "slots": [{"group": "INVENTORY", "index": 0}, {"group": "INVENTORY", "index": 1}, {"group": "HOTBAR", "index": 8}]
+    }
+  ],
+  "oclv": [
+    {
+      "name": "oclv_2x3",
+      "bin": "oclv_2x3.bin",
+      "w": 2,
+      "h": 3,
+      "near": 0.05,
+      "far": 256.0,
+      "rgb": [
+        0.0, 0.25, 0.5,   0.5, 0.75, 1.0,
+        0.125, 0.375, 0.625,  0.25, 0.5, 0.75,
+        0.375, 0.625, 0.875,  1.0, 0.0, 0.5
+      ],
+      "depth": [
+        0.0, 0.25,
+        0.5, 0.75,
+        1.0, 0.125
+      ]
+    }
+  ]
+}

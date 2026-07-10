@@ -4,10 +4,10 @@ import mod.kelvinlby.config.OclConfig;
 import mod.kelvinlby.link.InputDriver;
 import mod.kelvinlby.link.LinkBridge;
 import mod.kelvinlby.link.LinkConfig;
+import mod.kelvinlby.link.TcpBridge;
 import mod.kelvinlby.link.TickDriver;
 import mod.kelvinlby.link.UdsBridge;
 import mod.kelvinlby.link.VisionCapture;
-import mod.kelvinlby.link.ZmqBridge;
 import mod.kelvinlby.recorder.Recorder;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
@@ -20,7 +20,7 @@ import net.minecraft.util.Identifier;
 import java.util.function.IntSupplier;
 
 /**
- * Client entry point. Starts the ZMQ bridge, registers the per-tick driver on {@code END_CLIENT_TICK},
+ * Client entry point. Starts the link bridge, registers the per-tick driver on {@code END_CLIENT_TICK},
  * registers the RGBD vision capturer on {@code WorldRenderEvents.END_MAIN} (when enabled), and tears
  * everything down on shutdown.
  */
@@ -67,9 +67,9 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 				return uds;
 			}
 			default -> {
-				ZmqBridge zmq = new ZmqBridge();
-				zmq.start(cfg.toEndpoints());
-				return zmq;
+				TcpBridge tcp = new TcpBridge();
+				tcp.start(cfg.toEndpoints());
+				return tcp;
 			}
 		}
 	}

@@ -2,7 +2,7 @@ package mod.kelvinlby.link;
 
 /**
  * The transport-agnostic surface the game threads and {@link mod.kelvinlby.OpenCrafterLinkClient}
- * use to talk to the controller, so the concrete transport ({@link ZmqBridge} over ZMQ/TCP,
+ * use to talk to the controller, so the concrete transport ({@link TcpBridge} over plain TCP,
  * {@link UdsBridge} over plain {@code AF_UNIX}) can be swapped without touching the drivers.
  *
  * <p>Every implementation owns its own worker threads and JVM-side single-slot conflating queues

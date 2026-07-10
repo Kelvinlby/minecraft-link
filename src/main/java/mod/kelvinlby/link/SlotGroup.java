@@ -1,5 +1,7 @@
 package mod.kelvinlby.link;
 
+import mod.kelvinlby.link.generated.Protocol;
+
 /**
  * The canonical, screen-independent slot groups Open Crafter Link normalizes every Minecraft screen
  * into. Vanilla re-indexes {@code ScreenHandler.slots} per screen (a chest's slot 0 is a container
@@ -27,13 +29,13 @@ package mod.kelvinlby.link;
  * </ul>
  */
 public enum SlotGroup {
-	HOTBAR(0),
-	OFFHAND(1),
-	ARMOR(2),
-	INVENTORY(3),
-	CURSOR(4),
-	DISCARD(5),
-	EXTENSION(6);
+	HOTBAR(Protocol.G_HOTBAR),
+	OFFHAND(Protocol.G_OFFHAND),
+	ARMOR(Protocol.G_ARMOR),
+	INVENTORY(Protocol.G_INVENTORY),
+	CURSOR(Protocol.G_CURSOR),
+	DISCARD(Protocol.G_DISCARD),
+	EXTENSION(Protocol.G_EXTENSION);
 
 	private final int wireId;
 

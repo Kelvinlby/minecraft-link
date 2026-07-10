@@ -2,7 +2,7 @@ package mod.kelvinlby.link;
 
 /**
  * A single downsampled RGBD frame ready for the wire. Produced on the vision worker thread from a raw
- * framebuffer readback (see {@link VisionCapture}) and conflated through {@link ZmqBridge} to the
+ * framebuffer readback (see {@link VisionCapture}) and conflated through the link bridge to the
  * vision sender.
  *
  * <p>Both planes are row-major with a <b>top-left origin</b> (the capture flips the bottom-left-origin

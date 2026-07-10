@@ -3,7 +3,7 @@
 	"id": "open-crafter-link",
 	"version": "${version}",
 	"name": "Open Crafter Link",
-	"description": "Bridges the Minecraft player to the Open Crafter embodied inference engine over ZMQ (PUB/SUB, conflated).",
+	"description": "Bridges the Minecraft player to the Open Crafter embodied inference engine over a conflated TCP / Unix-socket link.",
 	"authors": [
 		"Kelvin_LBY"
 	],

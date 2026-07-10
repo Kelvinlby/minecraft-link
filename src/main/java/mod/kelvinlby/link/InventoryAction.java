@@ -1,5 +1,7 @@
 package mod.kelvinlby.link;
 
+import mod.kelvinlby.link.generated.Protocol;
+
 import java.util.List;
 
 /**
@@ -46,14 +48,14 @@ public record InventoryAction(Op op, SlotAddress a, SlotAddress b, List<SlotAddr
 	 * </ul>
 	 */
 	public enum Op {
-		NONE(0),
-		MOVE(1),
-		PICK(2),
-		PUT(3),
-		SWAP(4),
-		DROP(5),
-		DISTRIBUTE(6),
-		COLLECT(7);
+		NONE(Protocol.OP_NONE),
+		MOVE(Protocol.OP_MOVE),
+		PICK(Protocol.OP_PICK),
+		PUT(Protocol.OP_PUT),
+		SWAP(Protocol.OP_SWAP),
+		DROP(Protocol.OP_DROP),
+		DISTRIBUTE(Protocol.OP_DISTRIBUTE),
+		COLLECT(Protocol.OP_COLLECT);
 
 		private final int wireId;
 

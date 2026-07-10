@@ -19,10 +19,32 @@ jobs:
         with:
           java-version: '25'
           distribution: 'microsoft'
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
+      - name: verify generated protocol constants are in sync
+        # protocol/protocol.json is the single source of truth; the generated Protocol.java /
+        # _protocol.py must be regenerated and committed alongside any spec change.
+        run: |
+          python protocol/gen_constants.py
+          git diff --exit-code -- \
+            src/main/java/mod/kelvinlby/link/generated/Protocol.java \
+            pylib/src/ocl/_protocol.py
       - name: build
+        # Runs the JUnit golden test too (Loom wires `test` into `build`).
         run: ./gradlew build
+      - name: verify golden vectors are in sync
+        # The committed .bin files must match what BinaryCodec encodes from cases.json.
+        run: |
+          ./gradlew genGolden
+          git diff --exit-code -- protocol/golden
+      - name: python protocol golden test
+        run: |
+          pip install ./pylib
+          python -m unittest discover -s pylib/tests
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:

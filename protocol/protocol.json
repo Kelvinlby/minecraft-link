@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "vis_version": 1,
+  "movement_bits": {
+    "FRONT": 0,
+    "BACK": 1,
+    "LEFT": 2,
+    "RIGHT": 3,
+    "JUMP": 4,
+    "SPRINT": 5,
+    "SNEAK": 6
+  },
+  "action_bits": {
+    "ATTACK": 0,
+    "INTERACT": 1
+  },
+  "slot_groups": {
+    "HOTBAR": 0,
+    "OFFHAND": 1,
+    "ARMOR": 2,
+    "INVENTORY": 3,
+    "CURSOR": 4,
+    "DISCARD": 5,
+    "EXTENSION": 6
+  },
+  "ops": {
+    "NONE": 0,
+    "MOVE": 1,
+    "PICK": 2,
+    "PUT": 3,
+    "SWAP": 4,
+    "DROP": 5,
+    "DISTRIBUTE": 6,
+    "COLLECT": 7
+  }
+}

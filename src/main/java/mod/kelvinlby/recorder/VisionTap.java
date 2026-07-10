@@ -6,10 +6,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A transport-agnostic seam that lets the recorder observe the RGBD frames the link already produces,
- * without coupling either ZMQ/UDS bridge to the recorder. Each bridge's vision worker, right after it
- * converts a raw readback into a wire-ready {@link VisionFrame} (see {@code ZmqBridge.convert} /
- * {@code UdsBridge.convert}), also calls {@link #publish(VisionFrame)}. The recorder's {@code Sampler}
- * reads the latest frame via {@link #latest()} on its own fixed clock.
+ * without coupling the link bridge to the recorder. The shared vision worker, right after it converts a
+ * raw readback into a wire-ready {@link VisionFrame} (see {@code AbstractLinkBridge.convert}), also calls
+ * {@link #publish(VisionFrame)}. The recorder's {@code Sampler} reads the latest frame via
+ * {@link #latest()} on its own fixed clock.
  *
  * <p>This reuses all the existing render-thread readback + float conversion + depth linearization
  * work; the recorder never touches the GPU or re-does any per-pixel math. The single-slot

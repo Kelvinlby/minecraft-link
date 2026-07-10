@@ -8,18 +8,16 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 
 /**
- * Tunable endpoints and constants for the link. Vision tunables and (optionally) the endpoints are
- * overridable at launch via system properties (e.g. {@code -Docl.pubEndpoint=tcp://*:6000}) so they
- * can be changed without recompiling.
+ * Tunable endpoints and constants for the link. Vision tunables and (optionally) the TCP host are
+ * overridable at launch via system properties (e.g. {@code -Docl.tcpHost=192.168.1.5}) so they can be
+ * changed without recompiling.
  *
- * <p>The three ZMQ endpoints are resolved into an immutable {@link Endpoints} at bridge-start time
- * (see {@link mod.kelvinlby.config.OclConfig#toEndpoints()}); the {@code ocl.*Endpoint} system
- * properties, when set, pin them to a fixed override that wins over the in-game settings screen.
+ * <p>The TCP endpoints are resolved into an immutable {@link TcpEndpoints} at bridge-start time (see
+ * {@link mod.kelvinlby.config.OclConfig#toEndpoints()}); the UDS transport ({@link UdsEndpoints},
+ * {@link #resolveUdsDir()}) mirrors the same bind/connect asymmetry with {@code AF_UNIX} paths.
  *
- * <p>The mod <b>binds</b> its outbound PUB socket (it is the stable, long-lived endpoint that the
- * controller connects to) and <b>connects</b> its inbound SUB socket to the controller's PUB. The
- * UDS transport ({@link UdsEndpoints}, {@link #resolveUdsDir()}) mirrors that same bind/connect
- * asymmetry with plain {@code AF_UNIX} filesystem-path sockets.
+ * <p>For both transports the mod <b>binds</b> the telemetry and vision servers (stable, long-lived
+ * endpoints the controller connects to) and <b>connects</b> to the controller's instruction server.
  */
 public final class LinkConfig {
 	private LinkConfig() {}
@@ -43,14 +41,16 @@ public final class LinkConfig {
 	public static final String UDS_DIR_OVERRIDE = System.getProperty("ocl.udsDir");
 
 	/**
-	 * The three ZMQ endpoint strings the bridge binds/connects. Resolved per bridge start, so a settings
-	 * change can rebuild it and restart the bridge on new endpoints.
+	 * The TCP host + ports the bridge binds/connects. Resolved per bridge start, so a settings change can
+	 * rebuild it and restart the bridge on new endpoints.
 	 *
-	 * @param pub      outbound telemetry — the mod BINDs here; the controller SUB-connects
-	 * @param sub      inbound instructions — the mod SUB-connects here; the controller BINDs its PUB
-	 * @param visPub   outbound RGBD vision — the mod BINDs a second PUB here; the controller SUB-connects
+	 * @param host            controller host the mod connects to for instructions (telemetry/vision bind
+	 *                        on all interfaces, so no host is needed for them)
+	 * @param telemetryPort   outbound telemetry — the mod BINDs {@code *:telemetryPort}; controller connects
+	 * @param instructionPort inbound instructions — the mod CONNECTs to {@code host:instructionPort}
+	 * @param visionPort      outbound RGBD vision — the mod BINDs {@code *:visionPort}; controller connects
 	 */
-	public record Endpoints(String pub, String sub, String visPub) {}
+	public record TcpEndpoints(String host, int telemetryPort, int instructionPort, int visionPort) {}
 
 	/**
 	 * The three UDS socket paths the {@link UdsBridge} binds/connects. Mirrors {@link Endpoints}, but
@@ -134,16 +134,12 @@ public final class LinkConfig {
 	}
 
 	/**
-	 * Optional launch-time overrides of the three endpoints. When a property is set it wins over the
-	 * in-game settings screen; when unset ({@code null}) the runtime derives the endpoint from the
-	 * configured TCP URL. See {@link mod.kelvinlby.config.OclConfig#toEndpoints()}.
+	 * Optional launch-time override of the controller host the mod connects to for instructions
+	 * (e.g. {@code -Docl.tcpHost=192.168.1.5}). When set it wins over the in-game settings screen's
+	 * {@code tcpUrl}; when unset ({@code null}) the runtime uses the configured host. Telemetry and
+	 * vision always bind on all interfaces, so only the instruction host is overridable.
 	 */
-	public static final String PUB_ENDPOINT_OVERRIDE = System.getProperty("ocl.pubEndpoint");
-	public static final String SUB_ENDPOINT_OVERRIDE = System.getProperty("ocl.subEndpoint");
-	public static final String VIS_PUB_ENDPOINT_OVERRIDE = System.getProperty("ocl.visPubEndpoint");
-
-	/** Receive timeout for the SUB poll loop (ms). Keeps {@code stop()} responsive. */
-	public static final int RECV_POLL_MS = 5;
+	public static final String TCP_HOST_OVERRIDE = System.getProperty("ocl.tcpHost");
 
 	/**
 	 * Optional launch-time override of the published RGBD frame's target (downsampled) resolution. When

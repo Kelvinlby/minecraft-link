@@ -9,12 +9,11 @@ API — read player telemetry, read the RGBD vision stream, and drive the player
 pip install ./pylib
 ```
 
-The default **UDS** transport is pure standard library, so the base install has **no
-third-party dependencies**. `pyzmq` (TCP transport), `numpy`, `pillow`, `open3d` and
-`matplotlib` are optional — install the extras you want:
+Both the **UDS** and **TCP** transports are pure standard library, so the base install has **no
+third-party dependencies**. `numpy`, `pillow`, `open3d` and `matplotlib` are optional — install
+the extras you want:
 
 ```bash
-pip install "./pylib[tcp]"         # ZeroMQ TCP transport (networked controller)
 pip install "./pylib[vision]"      # PNG dumps + VisionFrame.to_numpy()
 pip install "./pylib[pointcloud]"  # live 3D RGBD viewer
 pip install "./pylib[all]"         # everything
@@ -66,10 +65,10 @@ Low-level codecs are exported too: `decode_telemetry`, `decode_vision`,
 The link speaks two wire transports; pick one in the mod's settings screen (**Link →
 Transport**) and match it here:
 
-- **UDS** (default) — plain `AF_UNIX` domain sockets with a `u32-LE length + payload` framing
-  (no ZeroMQ). Faster and lower-latency, no third-party deps, but **same-machine only**.
-- **TCP** — ZeroMQ PUB/SUB over loopback. Works across a network; needs the `[tcp]` extra
-  (`pyzmq`). The message payloads are byte-identical to UDS; only the transport differs.
+- **UDS** (default) — plain `AF_UNIX` domain sockets with a `u32-LE length + payload` framing.
+  Faster and lower-latency, but **same-machine only**.
+- **TCP** — the identical framing over `AF_INET`. Works across a network; no extra deps. The
+  message payloads are byte-identical to UDS; only the socket family differs.
 
 ```python
 # Default is UDS — auto-resolves the socket directory the same way the mod does:
@@ -159,15 +158,15 @@ subcommand to point at non-default endpoints.
 
 ## Wire roles
 
-**TCP transport** (ZeroMQ):
+**TCP transport** (`AF_INET`, `u32-LE length + payload` framing):
 
 | Stream | Magic | Mod socket            | Controller socket      |
 |--------|-------|-----------------------|------------------------|
-| Telemetry | `OCLO` | PUB bind `*:5557` | SUB connect `localhost:5557` |
-| Vision    | `OCLV` | PUB bind `*:5559` | SUB connect `localhost:5559` |
-| Instructions | `OCLI` | SUB connect `localhost:5558` | PUB bind `*:5558` |
+| Telemetry | `OCLO` | server bind `*:5557` | client connect `host:5557` |
+| Vision    | `OCLV` | server bind `*:5559` | client connect `host:5559` |
+| Instructions | `OCLI` | client connect `host:5558` | server bind `*:5558` |
 
-All sockets use `ZMQ_CONFLATE` (queue depth 1, newest wins).
+Every stream conflates to the newest message (queue depth 1, newest wins).
 
 **UDS transport** (`AF_UNIX`, `u32-LE length + payload` framing, in `<uds-dir>/`):
 

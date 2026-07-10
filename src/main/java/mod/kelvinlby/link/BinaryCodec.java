@@ -1,5 +1,7 @@
 package mod.kelvinlby.link;
 
+import mod.kelvinlby.link.generated.Protocol;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -63,8 +65,8 @@ import java.util.List;
  * </pre>
  *
  * <h2>Vision — Minecraft -&gt; controller ("OCLV")</h2>
- * A separate, frame-rate stream on its own PUB socket (see {@link LinkConfig.Endpoints#visPub()}), so the
- * large RGBD payload conflates independently of the small {@code OCLO} control telemetry.
+ * A separate, frame-rate stream on its own socket (the vision port / .sock), so the large RGBD payload
+ * conflates independently of the small {@code OCLO} control telemetry.
  * <pre>
  *   magic   : 4 bytes  "OCLV"
  *   version : u8       1
@@ -80,7 +82,9 @@ import java.util.List;
 public final class BinaryCodec {
 	private BinaryCodec() {}
 
-	static final byte VERSION = 2;
+	// Versions and bitmask layout come from the generated {@link Protocol} (single source of truth,
+	// mirrored in pylib's _protocol.py). VERSION/VIS_VERSION are held here as bytes for the wire.
+	static final byte VERSION = (byte) Protocol.VERSION;
 
 	// "OCLO" / "OCLI" / "OCLV" as big-endian-readable 4-byte tags (stored verbatim, order-independent).
 	private static final byte[] MAGIC_OUT = {'O', 'C', 'L', 'O'};
@@ -88,13 +92,14 @@ public final class BinaryCodec {
 	private static final byte[] MAGIC_VIS = {'O', 'C', 'L', 'V'};
 
 	/** Vision wire format version (independent of {@link #VERSION}). */
-	static final byte VIS_VERSION = 1;
+	static final byte VIS_VERSION = (byte) Protocol.VIS_VERSION;
 
 	// Movement bitmask layout.
-	private static final int M_FRONT = 1, M_BACK = 1 << 1, M_LEFT = 1 << 2, M_RIGHT = 1 << 3,
-			M_JUMP = 1 << 4, M_SPRINT = 1 << 5, M_SNEAK = 1 << 6;
+	private static final int M_FRONT = Protocol.M_FRONT, M_BACK = Protocol.M_BACK,
+			M_LEFT = Protocol.M_LEFT, M_RIGHT = Protocol.M_RIGHT,
+			M_JUMP = Protocol.M_JUMP, M_SPRINT = Protocol.M_SPRINT, M_SNEAK = Protocol.M_SNEAK;
 	// Action bitmask layout.
-	private static final int A_ATTACK = 1, A_INTERACT = 1 << 1;
+	private static final int A_ATTACK = Protocol.A_ATTACK, A_INTERACT = Protocol.A_INTERACT;
 
 	/** Header (magic + version) common to both directions. */
 	private static final int HEADER = 4 + 1;

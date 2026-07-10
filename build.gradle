@@ -13,7 +13,7 @@ loom {
 
 repositories {
 	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-	// JeroMQ lives on Maven Central, which Loom does not add by default.
+	// Maven Central (which Loom does not add by default) provides JUnit for the golden test.
 	mavenCentral()
 
 	// YACL (settings library) and Mod Menu (the screen entry point) are hosted on their own mavens.
@@ -30,10 +30,8 @@ dependencies {
 	// Fabric API. This is technically optional, but you probably want it anyway.
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
-	// ZeroMQ — pure Java (no natives), single ~600KB jar. `include` bundles it into the mod
-	// jar via Fabric's jar-in-jar so it is on the runtime classpath under Fabric's classloader;
-	// `implementation` puts it on the compile + dev-run classpath.
-	include implementation("org.zeromq:jeromq:0.6.0")
+	// The link speaks plain TCP / AF_UNIX with length-prefixed framing (see AbstractLinkBridge), so
+	// there is no ZeroMQ / native-socket dependency to bundle.
 
 	// The dataset recorder's rgb.mp4 is encoded by a system-installed ffmpeg (piped rawvideo; see
 	// FfmpegEncoder) — no Java video dependency needed.
@@ -42,6 +40,11 @@ dependencies {
 	// (not `include`) — bundling them via jar-in-jar would be wrong.
 	modImplementation "dev.isxander:yet-another-config-lib:${project.yacl_version}"
 	modImplementation "com.terraformersmc:modmenu:${project.modmenu_version}"
+
+	// JUnit 5 for the wire-protocol golden round-trip test (BinaryCodecGoldenTest). Test-only.
+	testImplementation platform("org.junit:junit-bom:5.10.2")
+	testImplementation "org.junit.jupiter:junit-jupiter"
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
 processResources {
@@ -55,6 +58,25 @@ processResources {
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 21
+}
+
+// Run the JUnit 5 golden test as part of `build` (Loom wires `test` into `build`, so CI's
+// `./gradlew build` runs it automatically). The test reads protocol/golden from the project root.
+test {
+	useJUnitPlatform()
+}
+
+// Regenerate protocol/golden/*.bin from cases.json using BinaryCodec as the reference encoder.
+// Run `./gradlew genGolden` after changing a fixture, then commit the updated .bin files.
+tasks.register('genGolden', JavaExec) {
+	group = 'verification'
+	description = 'Regenerate protocol/golden/*.bin from cases.json (reference encoder).'
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'mod.kelvinlby.link.GenGolden'
+	args = [
+			file('protocol/golden/cases.json').absolutePath,
+			file('protocol/golden').absolutePath,
+	]
 }
 
 java {

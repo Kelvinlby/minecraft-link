@@ -34,8 +34,8 @@ public final class OclConfigScreen {
 								.description(OptionDescription.of(Text.literal(
 										"How the mod talks to the Open Crafter controller. UDS (default) uses Unix "
 												+ "domain sockets — faster and lower-latency, but same-machine only. TCP uses "
-												+ "ZeroMQ over the network and works with a remote controller (needs pyzmq on "
-												+ "the controller side).")))
+												+ "plain sockets over the network and works with a remote controller (no extra "
+												+ "dependencies on the controller side).")))
 								.binding(defaults.transport, () -> cfg.transport, v -> cfg.transport = v)
 								.controller(opt -> EnumControllerBuilder.create(opt)
 										.enumClass(OclConfig.Transport.class))
@@ -43,9 +43,9 @@ public final class OclConfigScreen {
 						.option(Option.<String>createBuilder()
 								.name(Text.literal("TCP URL"))
 								.description(OptionDescription.of(Text.literal(
-										"TCP mode only. ZMQ endpoint URL of the Open Crafter controller (e.g. tcp://127.0.0.1). "
-												+ "Its host is used for the inbound instruction stream; the telemetry and "
-												+ "vision streams bind locally on the canonical ports (5557 and 5559).")))
+										"TCP mode only. Host of the Open Crafter controller (e.g. tcp://127.0.0.1 or "
+												+ "127.0.0.1). Its host is used for the inbound instruction stream; the telemetry "
+												+ "and vision streams bind locally on the canonical ports (5557 and 5559).")))
 								.binding(defaults.tcpUrl, () -> cfg.tcpUrl, v -> cfg.tcpUrl = v)
 								.controller(StringControllerBuilder::create)
 								.build())

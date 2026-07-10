@@ -27,12 +27,9 @@ from . import (
     NAN,
     Ocl,
     angle_close,
-    decode_telemetry,
-    decode_vision,
     frame_to_png,
     frame_to_pointcloud,
     save_ply,
-    zmq,
 )
 
 def _cmd_telemetry(link: Ocl, args):
@@ -214,48 +211,9 @@ def _cmd_roundtrip(link: Ocl, args):
 
 
 def _cmd_all(link: Ocl, args):
-    if link.transport == "uds":
-        return _cmd_all_uds(link, args)
-    tel = link._telemetry_socket()
-    vis = link._vision_socket()
-    poller = zmq.Poller()
-    poller.register(tel, zmq.POLLIN)
-    poller.register(vis, zmq.POLLIN)
-
+    """Poll telemetry and vision in turn with a short timeout (each recv already conflates to the
+    newest frame). The same framed-reader model backs both the UDS and TCP transports."""
     print(f"[all] telemetry={link.describe_telemetry()}  vision={link.describe_vision()}  for {args.seconds}s")
-    start = time.monotonic()
-    n_tel = n_vis = 0
-    last_tel = last_vis = None
-    last_print = 0.0
-    deadline = start + args.seconds
-    while time.monotonic() < deadline:
-        for sock, _ in poller.poll(500):
-            if sock is tel:
-                last_tel = decode_telemetry(tel.recv()); n_tel += 1
-            elif sock is vis:
-                last_vis = decode_vision(vis.recv()); n_vis += 1
-        now = time.monotonic()
-        if now - last_print >= 0.25:
-            el = now - start
-            tr = n_tel / el if el else 0
-            vr = n_vis / el if el else 0
-            ts = str(last_tel) if last_tel else "—"
-            vs = (f"{last_vis.w}x{last_vis.h} depth={last_vis.center_depth_blocks():.1f}b"
-                  if last_vis else "—")
-            print(f"\r[all] TEL {tr:5.1f}Hz {ts}  |  VIS {vr:5.1f}Hz {vs}   ", end="", flush=True)
-            last_print = now
-    print()
-    print(f"[all] telemetry: {n_tel} msgs ({n_tel/args.seconds:.1f} Hz) | "
-          f"vision: {n_vis} frames ({n_vis/args.seconds:.1f} Hz)")
-    if n_vis == 0:
-        print("[all] NOTE: no vision frames — is the mod running and in a world?")
-    return 0 if n_tel > 0 else 1
-
-
-def _cmd_all_uds(link: Ocl, args):
-    """UDS variant of `all`: the two _UdsReader streams don't share a zmq.Poller, so poll each
-    with a short timeout in turn (each recv already conflates to the newest frame)."""
-    print(f"[all] telemetry={link.describe_telemetry()}  vision={link.describe_vision()}  for {args.seconds}s (uds)")
     start = time.monotonic()
     n_tel = n_vis = 0
     last_tel = last_vis = None
@@ -322,16 +280,8 @@ def _live_pointcloud(link: Ocl, args):
         print("             on Wayland try:  QT_QPA_PLATFORM=wayland  (with pyqt5 installed)")
         return _fallback_save(link, args)
 
-    if link.transport == "uds":
-        def _poll_vision():
-            return link.read_vision(timeout=0.0)  # newest frame or None, non-blocking
-    else:
-        sock = link._vision_socket()
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-
-        def _poll_vision():
-            return decode_vision(sock.recv()) if poller.poll(0) else None
+    def _poll_vision():
+        return link.read_vision(timeout=0.0)  # newest frame or None, non-blocking (both transports)
 
     W, H = 960, 720
     renderer = rendering.OffscreenRenderer(W, H)

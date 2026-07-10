@@ -17,19 +17,20 @@ telemetry, read the RGBD vision stream, and drive the player.
         f = link.read_vision()                    # newest RGBD frame
         print(f.w, f.h, f.center_depth_blocks())
 
-The default UDS transport needs no third-party dependencies. `pyzmq` is only needed for the
-TCP transport (`pip install open-crafter-link[tcp]`); `numpy`/`pillow` are used lazily and
-only by the optional helpers (`VisionFrame.to_numpy`, `frame_to_png`, `frame_to_pointcloud`).
+Both transports are pure stdlib — no third-party dependencies. `numpy`/`pillow` are used lazily
+and only by the optional helpers (`VisionFrame.to_numpy`, `frame_to_png`, `frame_to_pointcloud`).
 
 The package also ships a CLI controller; run `ocl --help` (see `ocl.cli`).
 
-Wire roles (from the mod's LinkConfig / BinaryCodec):
+Wire roles (from the mod's LinkConfig / BinaryCodec) — the same length-prefixed client/server
+framing for both transports:
 
-    mod  PUB  tcp://*:5557   "OCLO"  telemetry      -> we SUB-connect
-    mod  PUB  tcp://*:5559   "OCLV"  RGBD vision     -> we SUB-connect
-    mod  SUB  tcp://localhost:5558   "OCLI" instr    <- we BIND a PUB and publish
+    mod  server  *:5557           "OCLO"  telemetry    -> we connect
+    mod  server  *:5559           "OCLV"  RGBD vision   -> we connect
+    mod  client  localhost:5558   "OCLI"  instructions  <- we BIND a server; the mod connects
 
-All sockets on both ends use ZMQ_CONFLATE (newest message wins, queue depth 1).
+Every stream conflates to the newest message (queue depth 1): the reader keeps only the freshest
+frame, and each sender slot holds only the latest payload.
 
 Transports
 ----------
@@ -37,10 +38,10 @@ Two wire transports are supported; pick with ``transport=`` or let it auto-detec
 endpoints (default UDS, matching the mod):
 
 * ``"uds"`` (default) — plain ``AF_UNIX`` domain sockets with a ``u32-LE length + payload``
-  framing (no ZeroMQ). Faster, same-machine only, no third-party deps. Endpoints are filesystem
-  paths (or ``unix:/path`` / ``ipc:///path``). Roles mirror TCP: the mod is the *server* for
-  telemetry+vision (we connect), and we are the *server* for instructions (the mod connects).
-* ``"tcp"`` — ZeroMQ PUB/SUB over TCP, as above; works across a network. Needs ``pyzmq``. Selected
+  framing. Faster, same-machine only. Endpoints are filesystem paths (or ``unix:/path`` /
+  ``ipc:///path``). The mod is the *server* for telemetry+vision (we connect), and we are the
+  *server* for instructions (the mod connects).
+* ``"tcp"`` — the identical framing over ``AF_INET``; works across a network. Selected
   automatically when you pass a custom ``tcp://`` endpoint. The payload bytes are identical to UDS.
 
 The default UDS directory matches the mod's resolver (``$XDG_RUNTIME_DIR`` on Linux, or the
@@ -57,14 +58,8 @@ import time
 from dataclasses import dataclass
 from typing import Iterator, Optional, Sequence
 
-# pyzmq is only needed for the TCP transport; imported lazily so UDS-only use has no dependency.
-try:
-    import zmq
-except ImportError:  # pragma: no cover
-    zmq = None
 
-
-__version__ = "1.0.1"
+__version__ = "2.0.0"
 
 __all__ = [
     "Ocl",
@@ -93,9 +88,9 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 # Endpoints (mirror LinkConfig defaults; override in the constructor)          #
 # --------------------------------------------------------------------------- #
-DEFAULT_TELEMETRY = "tcp://localhost:5557"   # connect to mod's OCLO PUB
-DEFAULT_VISION = "tcp://localhost:5559"      # connect to mod's OCLV PUB
-DEFAULT_INSTRUCT = "tcp://*:5558"            # bind our OCLI PUB (mod connects here)
+DEFAULT_TELEMETRY = "tcp://localhost:5557"   # connect to the mod's telemetry server
+DEFAULT_VISION = "tcp://localhost:5559"      # connect to the mod's vision server
+DEFAULT_INSTRUCT = "tcp://*:5558"            # bind our instruction server (the mod connects here)
 
 # --------------------------------------------------------------------------- #
 # UDS transport (mirror the mod's LinkConfig)                                  #
@@ -159,23 +154,44 @@ def _uds_path(endpoint: str, name: str, uds_dir: Optional[str]) -> str:
     return os.path.join(resolve_uds_dir(uds_dir), name)
 
 
+def _tcp_addr(endpoint: str, default_port: int) -> "tuple":
+    """Parse a ``tcp://host:port`` endpoint into a ``(host, port)`` tuple for ``socket``.
+
+    ``*`` / empty host means "all interfaces" (bind), rendered as ``""`` which ``socket.bind``
+    treats as ``INADDR_ANY``. A missing port falls back to ``default_port``. Accepts a bare
+    ``host:port`` or ``host`` too.
+    """
+    ep = (endpoint or "").strip()
+    if ep.startswith("tcp://"):
+        ep = ep[len("tcp://"):]
+    ep = ep.split("/", 1)[0]  # strip any trailing path
+    if ":" in ep:
+        host, _, port_s = ep.rpartition(":")
+        port = int(port_s) if port_s else default_port
+    else:
+        host, port = ep, default_port
+    if host in ("*", ""):
+        host = ""  # INADDR_ANY for bind
+    return (host, port)
+
+
 # --------------------------------------------------------------------------- #
 # Wire format                                                                  #
 # --------------------------------------------------------------------------- #
 MAGIC_OUT = b"OCLO"
 MAGIC_IN = b"OCLI"
 MAGIC_VIS = b"OCLV"
-VERSION = 2          # bumped to 2 when inventory was added to OCLO/OCLI (BinaryCodec.VERSION)
-VIS_VERSION = 1
 
-# OCLI movement bitmask (BinaryCodec.M_*). NOTE: this order is the codec's, which
-# differs from the Java record's field order — follow the codec.
-M_FRONT, M_BACK, M_LEFT, M_RIGHT = 1 << 0, 1 << 1, 1 << 2, 1 << 3
-M_JUMP, M_SPRINT, M_SNEAK = 1 << 4, 1 << 5, 1 << 6
-A_ATTACK, A_INTERACT = 1 << 0, 1 << 1
-
-# Slot group wire opcodes (Java SlotGroup.wireId). The controller addresses slots by (group, index).
-G_HOTBAR, G_OFFHAND, G_ARMOR, G_INVENTORY, G_CURSOR, G_DISCARD, G_EXTENSION = 0, 1, 2, 3, 4, 5, 6
+# Versions, movement/action bitmasks, and slot-group / inventory-op opcodes are the single source of
+# truth in protocol/protocol.json, generated into _protocol.py (and the mod's Protocol.java) so the two
+# languages can never silently disagree. VERSION was bumped to 2 when inventory was added to OCLO/OCLI.
+from ._protocol import (  # noqa: E402  (generated constants; re-exported for callers)
+    VERSION, VIS_VERSION,
+    M_FRONT, M_BACK, M_LEFT, M_RIGHT, M_JUMP, M_SPRINT, M_SNEAK,
+    A_ATTACK, A_INTERACT,
+    G_HOTBAR, G_OFFHAND, G_ARMOR, G_INVENTORY, G_CURSOR, G_DISCARD, G_EXTENSION,
+    OP_NONE, OP_MOVE, OP_PICK, OP_PUT, OP_SWAP, OP_DROP, OP_DISTRIBUTE, OP_COLLECT,
+)
 
 # Canonical names for the fixed (non-extension) groups; extension carries its own registry id on the wire.
 GROUP_NAMES = {
@@ -188,9 +204,6 @@ GROUP_NAMES = {
 }
 # Reverse lookup for addressing by name (extension groups are addressed by their registry-id name).
 GROUP_IDS = {v: k for k, v in GROUP_NAMES.items()}
-
-# Inventory action opcodes (Java InventoryAction.Op.wireId).
-OP_NONE, OP_MOVE, OP_PICK, OP_PUT, OP_SWAP, OP_DROP, OP_DISTRIBUTE, OP_COLLECT = 0, 1, 2, 3, 4, 5, 6, 7
 
 NAN = float("nan")
 
@@ -486,16 +499,20 @@ def _write_frame(conn: socket.socket, payload: bytes) -> None:
     conn.sendall(_LEN.pack(len(payload)) + payload)
 
 
-class _UdsReader:
-    """Client end of a mod-server stream (telemetry / vision): connect, read framed messages,
-    and conflate to the newest so ``recv(timeout)`` mirrors ZMQ_CONFLATE semantics.
+class _FramedReader:
+    """Client end of a mod-server stream (telemetry / vision): connect, read framed messages, and
+    conflate to the newest so ``recv(timeout)`` keeps only the freshest frame (the newest-wins
+    behaviour the mod's conflating slots provide).
 
-    Connection is lazy and self-healing: if the mod isn't up (or drops), each ``recv`` retries
-    the connect within the timeout and returns None if nothing arrives, exactly like the ZMQ SUB.
+    Transport-generic: ``family`` is ``AF_UNIX`` (``address`` = a ``.sock`` path) or ``AF_INET``
+    (``address`` = a ``(host, port)`` tuple). Connection is lazy and self-healing: if the mod isn't
+    up (or drops), each ``recv`` retries the connect within the timeout and returns None if nothing
+    arrives.
     """
 
-    def __init__(self, path: str):
-        self.path = path
+    def __init__(self, family: int, address):
+        self.family = family
+        self.address = address
         self._conn: Optional[socket.socket] = None
         self._sel = selectors.DefaultSelector()
 
@@ -504,8 +521,8 @@ class _UdsReader:
             return self._conn
         while deadline is None or time.monotonic() < deadline:
             try:
-                c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                c.connect(self.path)
+                c = socket.socket(self.family, socket.SOCK_STREAM)
+                c.connect(self.address)
                 c.setblocking(False)
                 self._sel.register(c, selectors.EVENT_READ)
                 self._conn = c
@@ -557,21 +574,27 @@ class _UdsReader:
         self._sel.close()
 
 
-class _UdsInstructionServer:
-    """Server end of the instruction stream: bind the .sock, accept the mod's connection, and
-    write framed instructions. Mirrors the mod's OCLI role (the mod connects to us).
+class _FramedServer:
+    """Server end of the instruction stream: bind, accept the mod's connection, and write framed
+    instructions. Mirrors the mod's OCLI role (the mod connects to us).
 
-    Non-blocking accept so ``send`` never stalls when the mod isn't connected yet; instructions
-    sent before a connection exists are simply dropped (matching PUB with no subscriber)."""
+    Transport-generic: ``family`` is ``AF_UNIX`` (``address`` = a ``.sock`` path, unlinked first and
+    on close) or ``AF_INET`` (``address`` = a ``(host, port)`` tuple, bound with ``SO_REUSEADDR``).
+    Non-blocking accept so ``send`` never stalls when the mod isn't connected yet; instructions sent
+    before a connection exists are simply dropped (no consumer yet)."""
 
-    def __init__(self, path: str):
-        self.path = path
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(path)
+    def __init__(self, family: int, address):
+        self.family = family
+        self.address = address
+        if family == socket.AF_UNIX:
+            try:
+                os.unlink(address)
+            except FileNotFoundError:
+                pass
+        self._srv = socket.socket(family, socket.SOCK_STREAM)
+        if family == socket.AF_INET:
+            self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind(address)
         self._srv.listen(1)
         self._srv.setblocking(False)
         self._conn: Optional[socket.socket] = None
@@ -589,7 +612,7 @@ class _UdsInstructionServer:
     def send(self, data: bytes) -> None:
         self._accept_if_pending()
         if self._conn is None:
-            return  # no consumer yet — drop, like PUB with no subscriber
+            return  # no consumer yet — drop
         try:
             _write_frame(self._conn, data)
         except OSError:
@@ -600,10 +623,11 @@ class _UdsInstructionServer:
         if self._conn is not None:
             self._conn.close()
         self._srv.close()
-        try:
-            os.unlink(self.path)
-        except FileNotFoundError:
-            pass
+        if self.family == socket.AF_UNIX:
+            try:
+                os.unlink(self.address)
+            except FileNotFoundError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -612,9 +636,10 @@ class _UdsInstructionServer:
 class Ocl:
     """High-level client for the Open Crafter Link.
 
-    Defaults to the UDS transport (matching the mod), so a plain ``Ocl()`` needs no
-    third-party dependencies. Pass ``transport="tcp"`` (or a custom ``tcp://`` endpoint)
-    for a networked controller — that path needs ``pyzmq`` (``pip install open-crafter-link[tcp]``).
+    Defaults to the UDS transport (matching the mod). Both transports are pure stdlib — a plain
+    ``Ocl()`` (UDS) and ``Ocl(transport="tcp")`` (TCP, for a networked controller) each need no
+    third-party dependencies. TCP speaks the same length-prefixed framing as UDS, just over
+    ``AF_INET`` instead of ``AF_UNIX``.
 
     Lazily creates the sockets the first time each stream is used, so you only
     pay for what you touch. Use as a context manager (or call `close()`) to
@@ -633,7 +658,6 @@ class Ocl:
         *,
         transport: Optional[str] = None,
         uds_dir: Optional[str] = None,
-        context: "Optional[zmq.Context]" = None,
     ):
         self.telemetry_endpoint = telemetry
         self.vision_endpoint = vision
@@ -649,60 +673,40 @@ class Ocl:
                 transport = "tcp"
             else:
                 transport = "uds"
+        if transport not in ("uds", "tcp"):
+            raise ValueError(f"unknown transport {transport!r} (expected 'tcp' or 'uds')")
         self.transport = transport
         self.uds_dir = uds_dir
 
-        self._owns_ctx = False
-        self._ctx = None
         self._tel_sock = None
         self._vis_sock = None
         self._pub_sock = None
         self._pub_warmed = False
 
-        if transport == "tcp":
-            if zmq is None:
-                raise ImportError(
-                    "pyzmq is required for the TCP transport (UDS is the default and needs none): "
-                    "pip install 'open-crafter-link[tcp]'")
-            self._owns_ctx = context is None
-            self._ctx = context or zmq.Context.instance()
-        elif transport != "uds":
-            raise ValueError(f"unknown transport {transport!r} (expected 'tcp' or 'uds')")
-
     # ---- socket factories -------------------------------------------------- #
-    def _sub(self, endpoint):
-        s = self._ctx.socket(zmq.SUB)
-        s.setsockopt(zmq.CONFLATE, 1)     # match the mod: newest wins
-        s.setsockopt(zmq.SUBSCRIBE, b"")  # CONFLATE requires subscribe-all
-        s.connect(endpoint)
-        return s
+    def _reader(self, endpoint, uds_name, default_port):
+        """A conflating framed reader for a mod-server stream, for the active transport."""
+        if self.transport == "uds":
+            return _FramedReader(socket.AF_UNIX, _uds_path(endpoint, uds_name, self.uds_dir))
+        return _FramedReader(socket.AF_INET, _tcp_addr(endpoint, default_port))
 
     def _telemetry_socket(self):
         if self._tel_sock is None:
-            if self.transport == "uds":
-                self._tel_sock = _UdsReader(_uds_path(self.telemetry_endpoint, UDS_TELEMETRY, self.uds_dir))
-            else:
-                self._tel_sock = self._sub(self.telemetry_endpoint)
+            self._tel_sock = self._reader(self.telemetry_endpoint, UDS_TELEMETRY, 5557)
         return self._tel_sock
 
     def _vision_socket(self):
         if self._vis_sock is None:
-            if self.transport == "uds":
-                self._vis_sock = _UdsReader(_uds_path(self.vision_endpoint, UDS_VISION, self.uds_dir))
-            else:
-                self._vis_sock = self._sub(self.vision_endpoint)
+            self._vis_sock = self._reader(self.vision_endpoint, UDS_VISION, 5559)
         return self._vis_sock
 
     def _instruct_socket(self):
         if self._pub_sock is None:
             if self.transport == "uds":
-                self._pub_sock = _UdsInstructionServer(
-                    _uds_path(self.instruct_endpoint, UDS_INSTRUCTION, self.uds_dir))
+                self._pub_sock = _FramedServer(
+                    socket.AF_UNIX, _uds_path(self.instruct_endpoint, UDS_INSTRUCTION, self.uds_dir))
             else:
-                s = self._ctx.socket(zmq.PUB)
-                s.setsockopt(zmq.CONFLATE, 1)
-                s.bind(self.instruct_endpoint)
-                self._pub_sock = s
+                self._pub_sock = _FramedServer(socket.AF_INET, _tcp_addr(self.instruct_endpoint, 5558))
         return self._pub_sock
 
     # ---- reading ----------------------------------------------------------- #
@@ -720,14 +724,7 @@ class Ocl:
         return decode_vision(buf) if buf is not None else None
 
     def _recv(self, sock, timeout: float):
-        if self.transport == "uds":
-            return sock.recv(timeout)  # _UdsReader already conflates to the newest frame
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        ms = None if timeout is None else int(timeout * 1000)
-        if poller.poll(ms):
-            return sock.recv()
-        return None
+        return sock.recv(timeout)  # the framed reader already conflates to the newest frame
 
     def telemetry_stream(self, timeout: float = 1.0):
         """Yield Telemetry forever (None on each timeout gap)."""
@@ -748,9 +745,8 @@ class Ocl:
     def _send_bytes(self, data: bytes) -> None:
         sock = self._instruct_socket()
         if not self._pub_warmed:
-            # TCP PUB/SUB needs a moment for the mod's SUB to (re)connect before the first
-            # message lands; UDS instead needs a moment for the mod to connect to our server.
-            # Either way, a short warm-up avoids silently dropping the very first instruction.
+            # We're the instruction server; give the mod a moment to connect to us before the first
+            # send, so the very first instruction isn't silently dropped (same for TCP and UDS).
             time.sleep(0.3)
             self._pub_warmed = True
         sock.send(data)
@@ -859,13 +855,8 @@ class Ocl:
     def close(self) -> None:
         for s in (self._tel_sock, self._vis_sock, self._pub_sock):
             if s is not None:
-                if self.transport == "uds":
-                    s.close()
-                else:
-                    s.close(0)  # ZMQ: 0 = drop pending, don't linger
+                s.close()
         self._tel_sock = self._vis_sock = self._pub_sock = None
-        if self._owns_ctx and zmq is not None and self._ctx is not zmq.Context.instance():
-            self._ctx.term()
 
     def __enter__(self) -> "Ocl":
         return self
