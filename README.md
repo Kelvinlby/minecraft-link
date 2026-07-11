@@ -3,32 +3,35 @@
 [![build](https://img.shields.io/github/actions/workflow/status/Kelvinlby/minecraft-link/build.yml?branch=main&style=for-the-badge&logo=github&label=Build)](https://github.com/Kelvinlby/minecraft-link/actions/workflows/build.yml)
 
 A client-side **Fabric** mod that bridges a running Minecraft client to an external
-**Open Crafter** controller over [ZeroMQ](https://zeromq.org/). It streams the player's
-state and a real RGBD view of the world *out*, and applies movement / look / action
+**Open Crafter** controller over a small custom binary protocol on raw sockets. It streams the
+player's state and a real RGBD view of the world *out*, and applies movement / look / action
 instructions *in* — turning a vanilla client into a controllable embodied environment. It can
 also **record** aligned RGBD-frame + player-action datasets straight from human play.
 
 - **Minecraft:** 1.21.11 · **Loader:** Fabric · **Side:** client only
-- **Transport:** Unix domain sockets (`AF_UNIX`, length-prefixed framing) by default — a
-  faster local-only link with no ZeroMQ — or ZMQ over TCP (PUB/SUB, all sockets conflated —
-  newest message wins) for a networked controller; selectable in the settings screen
-  (**Link → Transport**)
+- **Transport:** Unix domain sockets (`AF_UNIX`) by default — a faster local-only link — or
+  plain TCP (`AF_INET`) for a networked controller; selectable in the settings screen
+  (**Link → Transport**). Both use the same `u32-LE length + payload` framing with no
+  third-party dependency; each stream conflates to the newest message (queue depth 1)
 
 ## How it works
 
-The mod runs a `ZmqBridge` with three independent streams. ZMQ sockets each live on
-their own worker thread; the game's tick and render threads only ever hand off through
-lock-free single-slot `AtomicReference`s, so neither game-critical thread blocks on I/O.
+The mod runs a `TcpBridge` or `UdsBridge` (both extending `AbstractLinkBridge`) with three
+independent streams. Each socket lives on its own worker thread; the game's tick and render
+threads only ever hand off through lock-free single-slot `AtomicReference`s, so neither
+game-critical thread blocks on I/O.
 
 | Stream | Magic | Direction | Mod socket | Cadence |
 |--------|-------|-----------|------------|---------|
-| Telemetry    | `OCLO` | MC → controller | PUB bind `*:5557` | ~20 Hz (client tick) |
-| Vision (RGBD)| `OCLV` | MC → controller | PUB bind `*:5559` | up to `visionMaxHz` (render thread) |
-| Instructions | `OCLI` | controller → MC | SUB connect `<host>:5558` | applied per tick |
+| Telemetry    | `OCLO` | MC → controller | server bind `*:5557` | ~20 Hz (client tick) |
+| Vision (RGBD)| `OCLV` | MC → controller | server bind `*:5559` | up to `visionMaxHz` (render thread) |
+| Instructions | `OCLI` | controller → MC | client connect `<host>:5558` | applied per tick |
 
-The mod **binds** its two outbound PUB sockets (stable, long-lived) and **connects** its
-inbound SUB to the controller's PUB. The controller host comes from the configured TCP URL;
-ports are canonical. See `BinaryCodec` for the exact little-endian wire layouts.
+The mod **binds** its two outbound servers (stable, long-lived) and **connects** its inbound
+instruction stream to the controller's server. The UDS transport mirrors the same bind/connect
+split over `AF_UNIX` socket files. The controller host comes from the configured TCP URL; ports
+are canonical. See `BinaryCodec` for the exact little-endian wire layouts, and
+[`protocol/README.md`](protocol/README.md) for how the two codecs are kept in sync.
 
 ### Control (inbound, `OCLI`)
 Each instruction lives for exactly one tick: `TickDriver` applies it and clears the slot,
@@ -77,8 +80,8 @@ the vision resolution updates without a client restart.
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| **Transport** | `UDS` | Link transport — `UDS` (local `AF_UNIX`) or `TCP` (ZMQ, networked) |
-| **TCP URL** | `tcp://127.0.0.1` | TCP mode: controller host for the inbound instruction stream |
+| **Transport** | `UDS` | Link transport — `UDS` (local `AF_UNIX`) or `TCP` (plain TCP, networked) |
+| **TCP URL** | `tcp://127.0.0.1` | TCP mode: controller host (host only; ports are canonical) for the inbound instruction stream |
 | **UDS directory** | *(blank)* | UDS mode: directory for the `.sock` files; blank = auto-resolve |
 | **Camera width**  | `768` | Width of published vision frames (px) |
 | **Camera height** | `432` | Height of published vision frames (px) |
@@ -115,7 +118,7 @@ Set via JVM args (`-Docl.<name>=<value>`); when present, these win over the in-g
 | `ocl.visionWidth` / `ocl.visionHeight` | from settings | Pin the downsample resolution |
 | `ocl.visionMaxHz` | `40` | Cap on capture rate |
 | `ocl.visionBoxFilter` | `false` | Box-average RGB on downsample instead of nearest-neighbour |
-| `ocl.pubEndpoint` / `ocl.subEndpoint` / `ocl.visPubEndpoint` | derived | Pin a full ZMQ endpoint string |
+| `ocl.tcpHost` | from settings | TCP mode: pin the controller host the mod connects to for instructions |
 | `ocl.udsDir` | from settings | Pin the directory holding the UDS `.sock` files |
 | `ocl.ffmpegPath` | from settings | Pin the ffmpeg binary used for `rgb.mp4` recording |
 
@@ -143,14 +146,14 @@ See [`pylib/README.md`](pylib/README.md) for setup and usage.
 The data plane — control, telemetry, and RGBD vision — is feature-complete, and the
 in-game settings are wired into the live runtime.
 
-- **Transport:** UDS (real `AF_UNIX`, the default) or TCP (ZMQ, for a networked controller),
-  chosen in the settings screen.
-  UDS does **not** use JeroMQ's `ipc://` (which is TCP-emulated, not real `AF_UNIX`); instead the
-  UDS path drops ZMTP entirely and uses a trivial length-prefixed framing over Java's built-in
-  `AF_UNIX` sockets (JEP 380) — the link only needs conflated, fire-and-forget binary messages, so
-  none of ZeroMQ's wire machinery is required. The Python controller (`pylib/`, imported as
-  `ocl`) speaks both. See `pylib/README.md` for the UDS socket paths and the Flatpak-sandbox
-  directory note.
+- **Transport:** UDS (real `AF_UNIX`, the default) or TCP (`AF_INET`, for a networked controller),
+  chosen in the settings screen. Both drop any ZeroMQ dependency: the link only needs conflated,
+  fire-and-forget binary messages, so each transport uses a trivial `u32-LE length + payload`
+  framing over Java's built-in sockets (UDS via JEP 380 `AF_UNIX`) — none of ZeroMQ's wire
+  machinery (ZMTP, PUB/SUB, routing) is required. The payload bytes are identical across both
+  transports; only the socket family differs. The Python controller (`pylib/`, imported as
+  `ocl`) speaks both. See [`pylib/README.md`](pylib/README.md) for the UDS socket paths and the
+  Flatpak-sandbox directory note.
 - **Vision downsampling** maps the framebuffer onto the target resolution per-axis with no
   aspect-ratio correction; pick a camera width/height matching your window aspect to avoid
   a squashed image (the 768×432 default suits a typical 16:9 window).

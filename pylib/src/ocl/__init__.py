@@ -821,9 +821,10 @@ class Ocl:
         self.drive(inv_op=OP_DISTRIBUTE, slot_list=targets)
 
     def collect(self, group, index: int = 0) -> None:
-        """Gather all matching items onto the cursor — the vanilla double-click on (group, index). Emitted
-        as a PICKUP then PICKUP_ALL on the slot in a single tick, so the cursor ends holding as much of that
-        item as it can from the open inventory."""
+        """Gather all matching items onto the cursor — the sweep of a vanilla double-click on (group, index).
+        Emitted as the PICKUP_ALL click alone, mirroring the double-click's second click: it assumes the
+        matching stack is already on the cursor (call `pick` on the slot first), and ends with the cursor
+        holding as much of that item as it can from the open inventory."""
         self.drive(inv_op=OP_COLLECT, slot_a=_addr(group, index))
 
     def drop(self, group="hotbar", index: int = 0) -> None:

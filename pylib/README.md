@@ -78,13 +78,13 @@ with Ocl() as link:
 # pin an explicit directory (must match what the mod uses):
 Ocl(uds_dir="/run/user/1000")
 
-# opt into TCP for a networked controller (needs the [tcp] extra):
+# opt into TCP for a networked controller (no extra deps):
 Ocl("tcp://192.168.1.5:5557", "tcp://192.168.1.5:5559", "tcp://*:5558")
 ```
 
 When the transport isn't stated it defaults to UDS (matching the mod); passing a custom
 `tcp://` endpoint auto-selects TCP, and a `unix:`/`ipc://`/path endpoint selects UDS. On the
-CLI, use `--transport tcp` (and, for TCP, install the `[tcp]` extra) or `--uds-dir DIR`.
+CLI, use `--transport tcp` or `--uds-dir DIR` (both transports are pure stdlib — no extra deps).
 
 **Socket directory.** In UDS mode the three `.sock` files live in a directory both processes
 must agree on. Blank/auto resolves (matching the mod): `$XDG_RUNTIME_DIR`, or — inside a Flatpak

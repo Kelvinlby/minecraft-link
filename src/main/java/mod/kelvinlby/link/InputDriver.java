@@ -212,9 +212,10 @@ public final class InputDriver {
 						&& action.a().group() != SlotGroup.CURSOR) {
 					int slotId = InventoryMapper.resolveSlotId(player, action.a());
 					if (slotId >= 0) {
-						// A vanilla double-click: the first click picks the slot's stack up onto the cursor,
-						// the second (double-click) sweeps all matching stacks onto it via PICKUP_ALL.
-						im.clickSlot(syncId, slotId, 0, SlotActionType.PICKUP, player);
+						// The PICKUP_ALL sweep of a vanilla double-click, mirroring its second click: it gathers
+						// all matching stacks onto the cursor and assumes the stack is already held there (a
+						// preceding pick put it there). Replaying a recorded pick + collect thus reproduces the
+						// original two-click gather exactly.
 						im.clickSlot(syncId, slotId, 0, SlotActionType.PICKUP_ALL, player);
 					}
 				}

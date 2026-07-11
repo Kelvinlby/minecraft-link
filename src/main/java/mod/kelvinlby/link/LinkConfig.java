@@ -53,7 +53,7 @@ public final class LinkConfig {
 	public record TcpEndpoints(String host, int telemetryPort, int instructionPort, int visionPort) {}
 
 	/**
-	 * The three UDS socket paths the {@link UdsBridge} binds/connects. Mirrors {@link Endpoints}, but
+	 * The three UDS socket paths the {@link UdsBridge} binds/connects. Mirrors {@link TcpEndpoints}, but
 	 * carries resolved filesystem {@link Path}s (plain {@code AF_UNIX}, no ZMQ) instead of URL strings.
 	 *
 	 * @param telemetry   outbound telemetry — the mod BINDs a server socket here; the controller connects

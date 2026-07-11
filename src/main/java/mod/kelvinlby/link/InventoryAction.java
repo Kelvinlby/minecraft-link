@@ -43,8 +43,11 @@ public record InventoryAction(Op op, SlotAddress a, SlotAddress b, List<SlotAddr
 	 *       open, drops one item from the addressed slot ({@code THROW} button 0).</li>
 	 *   <li>{@link #DISTRIBUTE} — a left-click drag: divides the cursor stack evenly across the
 	 *       {@link #slots} list, emitted as the vanilla 3-stage {@code QUICK_CRAFT} sequence in one tick.</li>
-	 *   <li>{@link #COLLECT} — a double-click on the slot: gathers all matching stacks onto the cursor,
-	 *       emitted as the vanilla {@code PICKUP} then {@code PICKUP_ALL} pair in one tick.</li>
+	 *   <li>{@link #COLLECT} — the sweep of a vanilla double-click: gathers all matching stacks onto the
+	 *       cursor, emitted as the vanilla {@code PICKUP_ALL} click alone. It assumes the matching stack is
+	 *       already on the cursor (put there by a preceding {@link #PICK}), mirroring the second click of a
+	 *       double-click; a full double-click is therefore recorded and replayed as {@code pick} then
+	 *       {@code collect}.</li>
 	 * </ul>
 	 */
 	public enum Op {

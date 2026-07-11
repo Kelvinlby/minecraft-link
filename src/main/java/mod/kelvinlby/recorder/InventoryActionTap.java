@@ -29,22 +29,23 @@ import java.util.concurrent.atomic.AtomicLong;
  * period. The queue is bounded with a drop-oldest safety valve; clicks are rare, so this should never trigger.
  *
  * <h2>Multi-call sequences reassembled here</h2>
- * Two vanilla interactions arrive as several {@code clickSlot} calls within one tick and are reassembled into a
- * single logical action so the dataset matches the engine's command vocabulary:
- * <ul>
- *   <li><b>Drag</b> ({@code QUICK_CRAFT}): stage 0 begins, stage 1 repeats once per dragged slot, stage 2 ends.
- *       On stage 2 a <em>left</em>-drag emits one {@link InventoryAction.Op#DISTRIBUTE} carrying the slot list,
- *       a <em>right</em>-drag emits one {@link InventoryAction.Op#PUT} per slot, and a middle-drag (creative
- *       clone) emits nothing.</li>
- *   <li><b>Double-click</b> ({@code PICKUP} then {@code PICKUP_ALL} on the same slot): the leading {@code PICK}
- *       is retracted from the queue tail and replaced by a single {@link InventoryAction.Op#COLLECT}.</li>
- * </ul>
+ * A <b>drag</b> ({@code QUICK_CRAFT}) arrives as several {@code clickSlot} calls within one tick and is
+ * reassembled into a single logical action so the dataset matches the engine's command vocabulary: stage 0
+ * begins, stage 1 repeats once per dragged slot, stage 2 ends. On stage 2 a <em>left</em>-drag emits one
+ * {@link InventoryAction.Op#DISTRIBUTE} carrying the slot list, a <em>right</em>-drag emits one
+ * {@link InventoryAction.Op#PUT} per slot, and a middle-drag (creative clone) emits nothing.
+ *
+ * <p>A <b>double-click</b> gather is <em>not</em> reassembled: vanilla fires it as two genuinely separate
+ * clicks spread across two mouse press/release cycles (the leading {@code PICKUP} that lifts the stack onto
+ * the cursor, then the {@code PICKUP_ALL} sweep on release), so it is recorded 1:1 as vanilla emits it —
+ * a {@code pick} followed by a {@code collect} on the same slot. {@link InventoryAction.Op#COLLECT} therefore
+ * denotes only the sweep and assumes the cursor already holds the stack, mirroring {@code InputDriver}'s
+ * replay of {@code collect} as a lone {@code PICKUP_ALL}.
  *
  * <h2>Threading</h2>
- * {@link #observeClick} runs only on the client tick thread, so the drag accumulator and the pending-pick
- * reference need no locking. The sampler thread only ever calls {@link #drainInto}; the deque is thread-safe
- * and the retract touches only the tail the click thread itself just wrote, so the two never corrupt each
- * other. All state is static: one client has one interaction manager and one recorder.
+ * {@link #observeClick} runs only on the client tick thread, so the drag accumulator needs no locking. The
+ * sampler thread only ever calls {@link #drainInto}; the deque is thread-safe. All state is static: one
+ * client has one interaction manager and one recorder.
  */
 public final class InventoryActionTap {
 	private InventoryActionTap() {}
@@ -117,14 +118,6 @@ public final class InventoryActionTap {
 		InventoryAction action = InventoryMapper.classifyClick(player, slotId, button, type);
 		if (action.op() == InventoryAction.Op.NONE) {
 			return;
-		}
-		if (action.op() == InventoryAction.Op.COLLECT) {
-			// Double-click: vanilla sends PICKUP (recorded as PICK) then PICKUP_ALL on the same slot in one
-			// tick. Retract that leading PICK so the pair records as a single COLLECT.
-			InventoryAction tail = QUEUE.peekLast();
-			if (tail != null && tail.op() == InventoryAction.Op.PICK && sameSlot(tail.a(), action.a())) {
-				QUEUE.pollLast();
-			}
 		}
 		enqueue(action);
 	}
@@ -206,9 +199,5 @@ public final class InventoryActionTap {
 	/** Reset the drop counter at the start of a session. */
 	public static void resetDropped() {
 		dropped.set(0);
-	}
-
-	private static boolean sameSlot(SlotAddress x, SlotAddress y) {
-		return x != null && y != null && x.group() == y.group() && x.index() == y.index();
 	}
 }
