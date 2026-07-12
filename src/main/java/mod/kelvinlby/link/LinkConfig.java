@@ -14,7 +14,7 @@ import java.nio.file.attribute.PosixFilePermissions;
  *
  * <p>The TCP endpoints are resolved into an immutable {@link TcpEndpoints} at bridge-start time (see
  * {@link mod.kelvinlby.config.OclConfig#toEndpoints()}); the UDS transport ({@link UdsEndpoints},
- * {@link #resolveUdsDir()}) mirrors the same bind/connect asymmetry with {@code AF_UNIX} paths.
+ * {@link #resolveUdsDir(String)}) mirrors the same bind/connect asymmetry with {@code AF_UNIX} paths.
  *
  * <p>For both transports the mod <b>binds</b> the telemetry and vision servers (stable, long-lived
  * endpoints the controller connects to) and <b>connects</b> to the controller's instruction server.
@@ -29,9 +29,9 @@ public final class LinkConfig {
 
 	/**
 	 * Canonical UDS socket filenames, mirrored in {@code pylib/README.md}'s wire table. The mod BINDs a
-	 * server socket at {@link #UDS_TELEMETRY} and {@link #UDS_VISION} (the controller connects); it
-	 * CONNECTs to {@link #UDS_INSTRUCTION} (the controller binds a server there). The three files live in
-	 * the directory chosen by {@link #resolveUdsDir()}.
+	 * server socket at {@code UDS_TELEMETRY} and {@code UDS_VISION} (the controller connects); it
+	 * CONNECTs to {@code UDS_INSTRUCTION} (the controller binds a server there). The three files live in
+	 * the directory chosen by {@link #resolveUdsDir(String)}.
 	 */
 	public static final String UDS_TELEMETRY = "open-crafter-link-telemetry.sock";
 	public static final String UDS_INSTRUCTION = "open-crafter-link-instruction.sock";
