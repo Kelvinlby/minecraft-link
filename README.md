@@ -85,6 +85,45 @@ the vision resolution updates without a client restart.
 | **UDS directory** | *(blank)* | UDS mode: directory for the `.sock` files; blank = auto-resolve |
 | **Camera width**  | `768` | Width of published vision frames (px) |
 | **Camera height** | `432` | Height of published vision frames (px) |
+| **RGB virtual camera** | `false` | Publish the colour feed as a webcam (Linux only) |
+| **Depth virtual camera** | `false` | Publish the depth feed as a grayscale webcam (Linux only) |
+
+### Virtual cameras (preview + record with your own tools)
+
+The **Sensors** tab can publish the RGB and depth feeds as two independent OS-level webcams, so any
+software that reads a camera — OBS, Discord, Zoom, a browser, `ffplay` — can preview or record what
+the agent sees. This is the way to record with your own codec, bitrate and scene composition instead
+of the built-in dataset recorder's fixed layout. Frames are sent **uncompressed** at the camera
+resolution above; depth is grayscale with **near = black and the sky = white** (distance normalized
+by the far plane). Each camera claims its own loopback device and toggles independently.
+
+**Linux only, and requires the `v4l2loopback` kernel module.** A real virtual camera device cannot be
+created from inside a mod jar on Windows (which needs an admin-registered DirectShow filter DLL) or
+macOS (which needs a signed CoreMediaIO Camera Extension with Apple entitlements); the checkboxes are
+disabled there. On Linux, load the module first:
+
+```bash
+sudo modprobe v4l2loopback devices=2 exclusive_caps=1,1 card_label="Minecraft RGB","Minecraft Depth"
+```
+
+**`devices=2` matters:** the RGB and depth cameras each need their own node. With only one device
+loaded, enabling both leaves the second one off — the settings screen says so and names the fix.
+
+**`exclusive_caps=1` matters for Discord and Chromium:** they ignore or refuse a loopback node that
+advertises both capture *and* output capabilities, so the camera appears in the picker but fails to
+start (Discord reports **error 2011**). With exclusive caps the node advertises capture only. The
+trade-off is that the device is invisible until the mod actually streams to it, so tick the checkbox
+*before* selecting the camera in the consuming app.
+
+Persist it across reboots with `/etc/modules-load.d/` plus a `/etc/modprobe.d/` options file. The
+settings screen shows the exact command when no device is found, reports which device each camera is
+feeding while streaming, and explains any camera that could not start. Frames reach the device through the
+same **system-installed FFmpeg** the recorder uses, so a missing ffmpeg disables this too. If you run a
+sandboxed launcher (e.g. Flatpak Prism Launcher), grant device access as well:
+
+```bash
+flatpak override --user --device=all org.prismlauncher.PrismLauncher
+```
 
 ### Recording (dataset capture)
 
@@ -103,6 +142,7 @@ found.
 |---------|---------|--------|
 | **Record dataset** | `false` | Arm world-scoped dataset recording |
 | **Sample rate** | `20` Hz | Aligned samples per second (20 = one per tick) |
+| **Disable recipe book while recording** | `true` | Force manual crafting, so a recipe-book click can't fill the grid as one opaque action |
 | **Encoder backend** | `AUTO` | `AUTO` (GPU→CPU), `GPU`, or `CPU` ffmpeg encoding |
 | **Codec** | `H264` | Output video codec (`H264` or `H265`) |
 | **Quality** | `18` | CRF/CQ (0–51, lower = better/larger) |

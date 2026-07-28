@@ -9,6 +9,7 @@ import mod.kelvinlby.link.TickDriver;
 import mod.kelvinlby.link.UdsBridge;
 import mod.kelvinlby.link.VisionCapture;
 import mod.kelvinlby.recorder.Recorder;
+import mod.kelvinlby.vcam.VirtualCameraService;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -33,6 +34,17 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 	/** The dataset recorder, so the settings screen can {@code syncTo} the "Record dataset" toggle on save. */
 	public static Recorder recorder() {
 		return recorder;
+	}
+
+	/**
+	 * The virtual cameras. One per client; unlike the recorder this is not world-scoped — a preview feed
+	 * that vanished on the pause menu would be useless to a streamer — so it runs whenever enabled.
+	 */
+	private static final VirtualCameraService virtualCamera = new VirtualCameraService();
+
+	/** The virtual cameras, so the settings screen can {@code syncTo} their toggles on save. */
+	public static VirtualCameraService virtualCamera() {
+		return virtualCamera;
 	}
 
 	/**
@@ -99,6 +111,12 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> recorder.onWorldJoin());
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> recorder.onWorldLeave());
 
+		// Virtual cameras: publish the RGB/depth feeds as v4l2loopback webcams so any capture software
+		// can read them. Synced once here so a toggle left enabled across restarts re-arms; no
+		// JOIN/DISCONNECT hooks, since these are deliberately not world-scoped.
+		virtualCamera.syncTo(cfg.virtualCameraRgb, cfg.virtualCameraDepth,
+				cfg.cameraWidth, cfg.cameraHeight, LinkConfig.VISION_MAX_HZ, cfg.ffmpegPath);
+
 		// Vision: capture the 3D world (incl. first-person hand) across two seams within a frame — depth at
 		// END_MAIN (where the main framebuffer's depth is written), colour at the first HUD element (after
 		// the world + any shader-pack composite, before HUD overlays). This makes colour correct in vanilla
@@ -121,6 +139,7 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 			// Finalize any open session synchronously (and join an async finalize from a just-left
 			// world) before teardown, so quitting can't truncate a save.
 			recorder.shutdown();
+			virtualCamera.shutdown(); // release the loopback devices before the process exits
 			vision.dispose();
 			bridge().stop();
 		});
@@ -128,7 +147,8 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		// runs on an arbitrary thread with a possibly-dead GL context, so it touches the bridge only —
 		// never the GPU (VisionCapture.dispose guards against off-render-thread frees anyway).
 		Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-			recorder.shutdown();   // no GPU state; safe off the render thread
+			recorder.shutdown();      // no GPU state; safe off the render thread
+			virtualCamera.shutdown(); // likewise: kills the ffmpeg children that hold /dev/videoN
 			bridge().stop();
 		}, "ocl-shutdown"));
 

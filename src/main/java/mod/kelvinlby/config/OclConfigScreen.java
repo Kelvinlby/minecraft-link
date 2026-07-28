@@ -11,7 +11,10 @@ import dev.isxander.yacl3.api.controller.IntegerSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.StringControllerBuilder;
 import dev.isxander.yacl3.api.controller.TickBoxControllerBuilder;
 import mod.kelvinlby.OpenCrafterLinkClient;
+import mod.kelvinlby.link.LinkConfig;
 import mod.kelvinlby.recorder.FfmpegEncoder;
+import mod.kelvinlby.vcam.V4l2Device;
+import mod.kelvinlby.vcam.VirtualCameraService;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
@@ -102,18 +105,104 @@ public final class OclConfigScreen {
 												.step(1))
 										.build())
 								.build())
+						.group(virtualCameraGroup(cfg, defaults))
 						.build())
 				// ---- Tab: Recording ----
 				.category(recordingCategory(cfg, defaults))
 				// Persist, rebind the bridge (so a changed TCP URL takes effect live), then reconcile the
-				// recorder to the toggle so enabling/disabling "Record dataset" starts/stops a session now.
+				// recorder and the virtual cameras to their toggles so enabling/disabling any of them
+				// starts/stops immediately.
 				.save(() -> {
 					cfg.save();
 					OpenCrafterLinkClient.reloadLink();
 					OpenCrafterLinkClient.recorder().syncTo(cfg.recordDataset, cfg.recordSampleHz, cfg.toVideoSettings());
+					OpenCrafterLinkClient.virtualCamera().syncTo(cfg.virtualCameraRgb, cfg.virtualCameraDepth,
+							cfg.cameraWidth, cfg.cameraHeight, LinkConfig.VISION_MAX_HZ, cfg.ffmpegPath);
 				})
 				.build()
 				.generateScreen(parent);
+	}
+
+	/**
+	 * The Sensors tab's "Virtual camera" group: two independent toggles that publish the colour and
+	 * depth feeds as OS-level webcams.
+	 *
+	 * <p>Built in a helper because availability is conditional and worth explaining in place. Virtual
+	 * cameras need a writable {@code v4l2loopback} node, which exists only on Linux and only once the
+	 * user has loaded the kernel module — a mod cannot install it. So when the feature cannot work the
+	 * checkboxes are <b>disabled</b> ({@code .available(false)}) rather than silently doing nothing, and
+	 * a red label carries the exact fix from {@link V4l2Device#setupHint()} (a {@code modprobe} command,
+	 * or a {@code flatpak override} when running sandboxed). This mirrors the Recording tab's
+	 * missing-ffmpeg warning; the probe is plain filesystem reads, so reopening the screen after fixing
+	 * the setup clears it without a restart.
+	 */
+	private static OptionGroup virtualCameraGroup(OclConfig cfg, OclConfig defaults) {
+		OptionGroup.Builder group = OptionGroup.createBuilder()
+				.name(Text.literal("Virtual camera"));
+
+		String hint = V4l2Device.setupHint();
+		boolean usable = V4l2Device.supported() && hint == null;
+		if (hint != null) {
+			group.option(LabelOption.create(Text.literal("⚠ " + hint).formatted(Formatting.RED)));
+		} else {
+			group.option(LabelOption.create(Text.literal(
+					"Streams uncompressed frames at the camera resolution above to a v4l2loopback device, "
+							+ "so any capture software (OBS, Discord, Zoom, ffplay) can read it as a webcam. "
+							+ "Each camera needs its own device — load the module with devices=2.")));
+		}
+		if (!FfmpegEncoder.available(cfg.ffmpegPath)) {
+			group.option(LabelOption.create(Text.literal(
+							"⚠ FFmpeg not found — virtual cameras also need it. Set its path in the Recording tab.")
+					.formatted(Formatting.RED)));
+		}
+
+		// Report what actually happened on the last save. Without this a camera that could not claim a
+		// device left its checkbox ticked and looked enabled, while the consumer app got an unstartable
+		// device (Discord "error 2011") — the failure had no presence in the UI at all.
+		VirtualCameraService svc = OpenCrafterLinkClient.virtualCamera();
+		String error = svc.lastError();
+		if (error != null) {
+			group.option(LabelOption.create(Text.literal("⚠ " + error).formatted(Formatting.RED)));
+		}
+		String rgbDev = svc.rgbDevice();
+		String depthDev = svc.depthDevice();
+		if (rgbDev != null || depthDev != null) {
+			StringBuilder live = new StringBuilder("Streaming now:");
+			if (rgbDev != null) {
+				live.append("  RGB → ").append(rgbDev);
+			}
+			if (depthDev != null) {
+				live.append("  Depth → ").append(depthDev);
+			}
+			group.option(LabelOption.create(Text.literal(live.toString()).formatted(Formatting.GREEN)));
+		}
+
+		return group
+				.option(Option.<Boolean>createBuilder()
+						.name(Text.literal("RGB virtual camera"))
+						.description(OptionDescription.of(Text.literal(
+								"Publish the colour feed as a virtual webcam — the same image the controller "
+										+ "receives (the 3D world with the first-person hand, no HUD). Use it to preview "
+										+ "what the agent sees, or to record with your own software instead of the "
+										+ "built-in dataset recorder. Claims one loopback device.")))
+						.binding(defaults.virtualCameraRgb, () -> cfg.virtualCameraRgb, v -> cfg.virtualCameraRgb = v)
+						.controller(TickBoxControllerBuilder::create)
+						.available(usable)
+						.build())
+				.option(Option.<Boolean>createBuilder()
+						.name(Text.literal("Depth virtual camera"))
+						.description(OptionDescription.of(Text.literal(
+								"Publish the depth feed as a second, grayscale virtual webcam. Nearby blocks are "
+										+ "black and the sky is white (distance normalized by the far plane). Needs its "
+										+ "OWN loopback device, separate from the RGB camera — with only one device "
+										+ "loaded, enabling both leaves this one off (load the module with devices=2). "
+										+ "If it appears in Discord but fails to start, reload the module with "
+										+ "exclusive_caps=1,1.")))
+						.binding(defaults.virtualCameraDepth, () -> cfg.virtualCameraDepth, v -> cfg.virtualCameraDepth = v)
+						.controller(TickBoxControllerBuilder::create)
+						.available(usable)
+						.build())
+				.build();
 	}
 
 	/**

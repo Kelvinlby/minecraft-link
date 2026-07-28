@@ -79,6 +79,21 @@ public class OclConfig {
 	/** Width, in pixels, of the camera frames sent to the controller. */
 	public int cameraWidth = 768;
 
+	// --- Sensors / Virtual camera (v4l2loopback; Linux only — see V4l2Device) ---
+	/**
+	 * Expose the colour feed as an OS-level virtual camera, so it can be previewed or recorded with any
+	 * software that reads a webcam (OBS, Discord, Zoom, browsers). Streams the same frames the link
+	 * sends, at the {@link #cameraWidth}/{@link #cameraHeight} camera resolution, uncompressed. Off by
+	 * default: a camera that claimed a device the moment the mod loaded would be a surprise.
+	 */
+	public boolean virtualCameraRgb = false;
+	/**
+	 * Expose the depth feed as a second, grayscale virtual camera. Near is black and the sky (at or
+	 * beyond the far plane) is white. Independent of {@link #virtualCameraRgb}; each claims its own
+	 * loopback device.
+	 */
+	public boolean virtualCameraDepth = false;
+
 	// --- Recording ---
 	/**
 	 * Whether a dataset-recording session is active. Toggling this in the settings screen starts (on
