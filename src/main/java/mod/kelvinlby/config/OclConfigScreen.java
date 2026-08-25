@@ -115,7 +115,8 @@ public final class OclConfigScreen {
 				.save(() -> {
 					cfg.save();
 					OpenCrafterLinkClient.reloadLink();
-					OpenCrafterLinkClient.recorder().syncTo(cfg.recordDataset, cfg.recordSampleHz, cfg.toVideoSettings());
+					OpenCrafterLinkClient.recorder().syncTo(cfg.recordDataset, cfg.autoReplay,
+							cfg.eagerPacketEncoding, cfg.recordSampleHz, cfg.toVideoSettings());
 					OpenCrafterLinkClient.virtualCamera().syncTo(cfg.virtualCameraRgb, cfg.virtualCameraDepth,
 							cfg.cameraWidth, cfg.cameraHeight, LinkConfig.VISION_MAX_HZ, cfg.ffmpegPath);
 				})
@@ -220,20 +221,52 @@ public final class OclConfigScreen {
 									+ "Install ffmpeg or set its path under Video encoding below.")
 					.formatted(Formatting.RED)));
 		}
-		return cat
-				.option(Option.<Boolean>createBuilder()
+		Option<Boolean> autoReplay = Option.<Boolean>createBuilder()
+				.name(Text.literal("Auto replay"))
+				.description(OptionDescription.of(Text.literal(
+						"Automatically opens a client-only replay world, consumes every pending session from "
+								+ "<gameDir>/open-crafter-link/replay, writes datasets under recording, then returns "
+								+ "to the title screen. When off, entering a world records the player's live controls.")))
+				.binding(defaults.autoReplay, () -> cfg.autoReplay, v -> cfg.autoReplay = v)
+				.controller(TickBoxControllerBuilder::create)
+				.available(cfg.recordDataset)
+				.build();
+		Option<Boolean> eager = Option.<Boolean>createBuilder()
+				.name(Text.literal("Eager packet encoding"))
+				.description(OptionDescription.of(Text.literal(
+						"Auto replay only. Advances one configured output-sample interval per completed render "
+								+ "and temporarily removes VSync/FPS caps. This changes throughput, not the dataset "
+								+ "timeline or configured sample FPS.")))
+				.binding(defaults.eagerPacketEncoding,
+						() -> cfg.eagerPacketEncoding, v -> cfg.eagerPacketEncoding = v)
+				.controller(TickBoxControllerBuilder::create)
+				.available(cfg.recordDataset && cfg.autoReplay)
+				.build();
+		autoReplay.addListener((option, value) -> eager.setAvailable(option.available() && value));
+
+		Option<Boolean> enabled = Option.<Boolean>createBuilder()
 						.name(Text.literal("Record dataset"))
 						.description(OptionDescription.of(Text.literal(
 								"Capture aligned RGBD frames + player actions to a dataset under "
-										+ "<gameDir>/open-crafter-link/<timestamp>/. While enabled, every world you "
+										+ "<gameDir>/open-crafter-link/recording/<timestamp>/. With Auto replay off, every world you "
 										+ "enter (single-player or multiplayer) is recorded to its own session, "
 										+ "finalized when you leave the world — menus and the title screen are never "
-										+ "recorded. A toast shows the save progress on world exit. Toggling this "
+										+ "recorded. With Auto replay on, pending replays run automatically. A toast "
+										+ "shows save progress. Toggling this "
 										+ "while in a world starts/stops a session when you save. Frames are recorded "
 										+ "at the camera resolution set on the Sensors tab.")))
 						.binding(defaults.recordDataset, () -> cfg.recordDataset, v -> cfg.recordDataset = v)
 						.controller(TickBoxControllerBuilder::create)
-						.build())
+						.build();
+		enabled.addListener((option, value) -> {
+			autoReplay.setAvailable(value);
+			eager.setAvailable(value && autoReplay.pendingValue());
+		});
+
+		return cat
+				.option(enabled)
+				.option(autoReplay)
+				.option(eager)
 				.option(Option.<Boolean>createBuilder()
 						.name(Text.literal("Disable recipe book while recording"))
 						.description(OptionDescription.of(Text.literal(

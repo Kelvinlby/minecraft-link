@@ -6,7 +6,7 @@ A client-side **Fabric** mod that bridges a running Minecraft client to an exter
 **Open Crafter** controller over a small custom binary protocol on raw sockets. It streams the
 player's state and a real RGBD view of the world *out*, and applies movement / look / action
 instructions *in* — turning a vanilla client into a controllable embodied environment. It can
-also **record** aligned RGBD-frame + player-action datasets straight from human play.
+also **record** aligned RGBD-frame + player-action datasets from human play or replayed packet sessions.
 
 - **Minecraft:** 1.21.11 · **Loader:** Fabric · **Side:** client only
 - **Transport:** Unix domain sockets (`AF_UNIX`) by default — a faster local-only link — or
@@ -127,12 +127,29 @@ flatpak override --user --device=all org.prismlauncher.PrismLauncher
 
 ### Recording (dataset capture)
 
-The **Recording** tab arms a dataset recorder: while enabled, every world you enter (single- or
-multiplayer) is captured to its own session under `<gameDir>/open-crafter-link/<timestamp>/` and
-finalized (async, with a save-progress toast) when you leave the world — menus and the title screen
-are never recorded. Each session holds aligned RGBD frames + player actions sampled at
+The **Recording** tab arms a dataset recorder. With **Auto replay** off, every world you enter
+(single- or multiplayer) is captured to its own session under
+`<gameDir>/open-crafter-link/recording/<timestamp>/` and finalized (async, with a save-progress toast)
+when you leave the world. Each session holds aligned RGBD frames + player actions sampled at
 **Sample rate** Hz (default `20`, one per tick), recorded at the Sensors-tab camera resolution (the
 recorder taps the link's existing vision pipeline, so there is no separate recording resolution).
+
+With **Auto replay** on, the mod consumes the oldest recorder-plugin session from
+`<gameDir>/open-crafter-link/replay/`, opens a client-only in-memory replay world, and processes the
+entire inbox without waiting for the user to enter another world. No integrated server, terrain
+generator, or save is started. PLAY/S2C
+bytes are decoded with Minecraft's own packet codecs and applied as simulated server responses;
+PLAY/C2S bytes are decoded into timestamped movement, look, hotbar, attack/use, and inventory
+actions. The packet protocol number must match this Minecraft client. When the inbox is complete,
+the mod unloads the replay world and returns to the title screen.
+
+After replay and dataset finalization both succeed, the input file/session directory is moved to
+`replay/done/`; interrupted, incompatible, or failed inputs stay in the inbox for diagnosis
+and retry. `Eager packet encoding` replaces wall-clock pacing with one virtual sample interval per
+completed GPU capture, temporarily disables VSync and raises the client FPS cap, and blocks on encoder
+backpressure. Thus it changes only processing speed: output timestamps and MP4 FPS still follow the
+configured **Sample rate**. A top-right progress toast tracks indexed session progress; it is drawn
+after the recorder's pre-HUD RGB capture seam and therefore never appears in RGB or depth output.
 
 RGB is encoded to `rgb.mp4` through a **system-installed FFmpeg** (configurable codec/quality/keyframe
 interval and GPU-vs-CPU backend); actions and depth are still written even when no ffmpeg binary is
@@ -141,6 +158,8 @@ found.
 | Setting | Default | Effect |
 |---------|---------|--------|
 | **Record dataset** | `false` | Arm world-scoped dataset recording |
+| **Auto replay** | `false` | Automatically encode every pending replay in a private world |
+| **Eager packet encoding** | `false` | Auto replay: render/encode on a virtual clock as fast as the GPU and encoder allow |
 | **Sample rate** | `20` Hz | Aligned samples per second (20 = one per tick) |
 | **Disable recipe book while recording** | `true` | Force manual crafting, so a recipe-book click can't fill the grid as one opaque action |
 | **Encoder backend** | `AUTO` | `AUTO` (GPU→CPU), `GPU`, or `CPU` ffmpeg encoding |

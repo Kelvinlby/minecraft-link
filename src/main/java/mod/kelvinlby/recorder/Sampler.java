@@ -43,8 +43,10 @@ public final class Sampler {
 	private static final int QUEUE_CAPACITY = 16;
 
 	private final int hz;
-	private final ActionReader actions;
+	private final SampleSource actions;
 	private final DatasetWriter writer;
+	/** Non-null only for packet mode; provides its virtual clock and eager render handshake. */
+	private final PacketReplaySession replay;
 
 	private final BlockingQueue<Sample> queue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
 	private volatile boolean running;
@@ -56,9 +58,14 @@ public final class Sampler {
 	private final AtomicLong repeated = new AtomicLong();
 
 	public Sampler(int hz, ActionReader actions, DatasetWriter writer) {
+		this(hz, actions, writer, null);
+	}
+
+	public Sampler(int hz, SampleSource actions, DatasetWriter writer, PacketReplaySession replay) {
 		this.hz = Math.max(1, hz);
 		this.actions = actions;
 		this.writer = writer;
+		this.replay = replay;
 	}
 
 	/** The session folder name (its timestamp), for the save toast. */
@@ -131,9 +138,18 @@ public final class Sampler {
 
 	/** Fixed-deadline clock: latch one aligned sample per period, pack it, and enqueue (dropping if full). */
 	private void clockLoop() {
+		if (replay != null && replay.eager()) {
+			eagerClockLoop();
+			return;
+		}
+		if (replay != null) {
+			while (running && !replay.captureReady()) LockSupport.parkNanos(1_000_000L);
+			if (!running) return;
+		}
 		long periodNs = 1_000_000_000L / hz;
 		long seq = 0;
-		long next = System.nanoTime();
+		long base = replay == null ? System.nanoTime() : replay.captureWallStartNs();
+		long next = base;
 		VisionFrame lastRaw = null;
 		PackedFrame lastPacked = null;
 
@@ -164,14 +180,17 @@ public final class Sampler {
 
 			// Attach the discrete slot clicks observed since the last tick — an edge stream drained
 			// non-conflatingly (see InventoryActionTap), unlike the polled movement/look state.
-			ActionSet action = actions.current();
-			List<InventoryAction> inv = new ArrayList<>(2);
-			InventoryActionTap.drainInto(inv);
-			if (!inv.isEmpty()) {
-				action = action.withInventoryActions(inv);
+			long offsetMicros = Math.max(0L, (next - base) / 1_000L);
+			long actionMicros = replay == null ? offsetMicros : replay.replayTimeForOffset(offsetMicros);
+			ActionSet action = actions.sampleAt(actionMicros);
+			if (actions.drainLiveInventoryActions()) {
+				List<InventoryAction> inv = new ArrayList<>(2);
+				InventoryActionTap.drainInto(inv);
+				if (!inv.isEmpty()) action = action.withInventoryActions(inv);
 			}
 
-			Sample sample = new Sample(seq++, System.nanoTime(), frame, action,
+			long timestamp = replay == null ? System.nanoTime() : offsetMicros * 1_000L;
+			Sample sample = new Sample(seq++, timestamp, frame, action,
 					actions.currentInventory(), repeat);
 			if (queue.offer(sample)) {
 				if (repeat) {
@@ -180,6 +199,47 @@ public final class Sampler {
 			} else {
 				dropped.incrementAndGet(); // writer is behind; drop rather than stall the clock
 			}
+		}
+	}
+
+	/**
+	 * Virtual-clock sampler. Replay opens one sample window before rendering and holds world state fixed
+	 * until a fresh frame from that render has been queued. Blocking on a full writer queue is intentional:
+	 * eager mode is lossless and simply lets encoding backpressure regulate replay throughput.
+	 */
+	private void eagerClockLoop() {
+		VisionFrame lastRaw = VisionTap.latest();
+		long lastSeq = -1L;
+		while (running) {
+			PacketReplaySession.SampleWindow window;
+			try {
+				window = replay.awaitWindow(lastSeq);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+			if (!running || window == null) return;
+
+			VisionFrame fresh;
+			do {
+				fresh = VisionTap.latest();
+				if (!running) return;
+				if (fresh == null || fresh == lastRaw) LockSupport.parkNanos(500_000L);
+			} while (fresh == null || fresh == lastRaw);
+
+			PackedFrame frame = PackedFrame.of(fresh);
+			ActionSet action = actions.sampleAt(window.replayMicros());
+			Sample sample = new Sample(window.seq(), window.timeMicros() * 1_000L, frame, action,
+					actions.currentInventory(), false);
+			boolean enqueued = false;
+			while (running && !enqueued) {
+				try { enqueued = queue.offer(sample, 100L, TimeUnit.MILLISECONDS); }
+				catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+			}
+			if (!enqueued) return;
+			lastRaw = fresh;
+			lastSeq = window.seq();
+			replay.frameConsumed(window.seq());
 		}
 	}
 

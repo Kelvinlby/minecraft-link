@@ -28,7 +28,7 @@ import java.util.zip.ZipOutputStream;
  * the recorder's single writer thread (see {@link Recorder}), so no field here is touched concurrently
  * and the encoding runs off the sampler's clock.
  *
- * <p>Layout under {@code <gameDir>/open-crafter-link/<session>/}:
+ * <p>Layout under {@code <gameDir>/open-crafter-link/recording/<session>/}:
  * <ul>
  *   <li>{@code rgb.mp4} — H.264/H.265 encoded by a piped system {@code ffmpeg} (GPU when available;
  *       see {@link FfmpegEncoder}), one frame per sample, fps = the recorder's sample rate. The MP4

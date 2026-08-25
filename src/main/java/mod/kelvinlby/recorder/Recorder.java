@@ -1,8 +1,8 @@
 package mod.kelvinlby.recorder;
 
 import mod.kelvinlby.OpenCrafterLink;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.TitleScreen;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -28,27 +28,35 @@ import java.time.format.DateTimeFormatter;
  * uses the synchronous, toast-less {@link #shutdown()}, which also joins any finalize still in
  * flight so quitting right after leaving a world cannot truncate the save.
  *
- * <p>Each session writes to {@code <gameDir>/open-crafter-link/<timestamp>/}. {@code getGameDir()} is
- * the Minecraft profile/instance root (note {@code OclConfig} uses {@code getConfigDir()} =
- * {@code <gameDir>/config}). The RGBD frames come from the link's existing vision pipeline via
- * {@link VisionTap}, which a session enables on start and disables on stop so the bridges skip the
- * tap when nobody is recording.
+ * <p>Each session writes to
+ * {@code <gameDir>/open-crafter-link/recording/<timestamp>/}. {@code getGameDir()} is the
+ * Minecraft profile/instance root (the config instead lives under {@code <gameDir>/config}).
+ * The RGBD frames come from the link's existing vision pipeline via {@link VisionTap}, which a
+ * session enables on start and disables on stop so the bridges skip the tap when nobody is recording.
  */
 public final class Recorder {
 
 	private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
+	private static final Path REPLAY_INBOX = OpenCrafterLink.PROFILE_DIR.resolve("replay");
 
 	private final ActionReader actionReader = new ActionReader();
 	private Sampler sampler;
+	private PacketReplaySession replay;
+	private ReplayWorldHost replayWorldHost;
 	private volatile boolean running;
 
 	// Armed config, applied to the next session. Guarded by this.
 	private boolean armed;
+	private boolean autoReplay;
+	private boolean eagerPacketEncoding;
 	private int sampleHz = 20;
 	private FfmpegEncoder.Settings video;
 
 	/** The in-flight async finalize, if any; {@link #shutdown()} joins it. Guarded by this. */
 	private Thread finalizeThread;
+	private boolean autoWorldActive;
+	private boolean autoBatchHalted;
+	private boolean disconnectQueued;
 
 	/** The action reader to register on a client-tick event; it observes the human's live inputs. */
 	public ActionReader actionReader() {
@@ -65,22 +73,45 @@ public final class Recorder {
 	 * a world — start or finalize a session right away so the settings toggle acts immediately.
 	 * Called at init (where no world exists yet, so it only arms) and after each settings save.
 	 */
-	public synchronized void syncTo(boolean enabled, int hz, FfmpegEncoder.Settings videoSettings) {
+	public synchronized void syncTo(boolean enabled, boolean autoReplay,
+			boolean eagerEncoding, int hz, FfmpegEncoder.Settings videoSettings) {
 		this.armed = enabled;
+		this.autoReplay = autoReplay;
+		this.autoBatchHalted = false; // an explicit settings save/reload permits retrying a failed input
+		this.eagerPacketEncoding = eagerEncoding;
 		this.sampleHz = hz;
 		this.video = videoSettings;
 		MinecraftClient mc = MinecraftClient.getInstance(); // null during client construction (mod init)
 		boolean inWorld = mc != null && mc.world != null;
-		if (enabled && inWorld && !running) {
+		if (!enabled) {
+			if (running) stopAsync();
+			if (autoWorldActive) queueDisconnectToTitle(mc);
+		} else if (autoReplay) {
+			// Auto replay owns a client-only packet world. Never replay into the user's current save.
+			if (inWorld && !autoWorldActive) {
+				if (running) stopAsync();
+				if (hasPendingReplay()) queueDisconnectToTitle(mc);
+			}
+		} else if (inWorld && !running) {
 			start();
-		} else if (!enabled && running) {
-			stopAsync();
+		}
+		if (!autoReplay && autoWorldActive) {
+			autoWorldActive = false;
+			queueDisconnectToTitle(mc);
 		}
 	}
 
 	/** World joined (SP or MP) — begin a session if the recorder is armed. */
 	public synchronized void onWorldJoin() {
-		if (armed && !running) {
+		if (!armed) return;
+		if (autoReplay) {
+			// The fake connection may emit Fabric's JOIN event while start() is already bootstrapping it.
+			if (autoWorldActive) return;
+			// A manually entered world is left alone while the replay inbox is empty.
+			if (hasPendingReplay()) queueDisconnectToTitle(MinecraftClient.getInstance());
+			return;
+		}
+		if (!running) {
 			start();
 		}
 	}
@@ -90,26 +121,111 @@ public final class Recorder {
 		if (running) {
 			stopAsync();
 		}
+		autoWorldActive = false;
 	}
 
 	/** Begin a new recording session at the armed settings. Caller holds the lock. */
 	private void start() {
+		MinecraftClient mc = MinecraftClient.getInstance();
+		PacketReplaySession replaySession = null;
+		SampleSource source = actionReader;
+		if (autoReplay) {
+			autoWorldActive = true;
+			try {
+				replaySession = PacketReplaySession.open(REPLAY_INBOX,
+						sampleHz, eagerPacketEncoding, mc, this::onReplayFinished);
+			} catch (IOException e) {
+				OpenCrafterLink.LOGGER.error("[open-crafter-link] cannot start packet replay", e);
+				autoBatchHalted = true;
+				exitAutoReplayWorld();
+				return;
+			}
+			if (replaySession == null) {
+				OpenCrafterLink.LOGGER.info("[open-crafter-link] auto replay complete; {} is empty", REPLAY_INBOX);
+				exitAutoReplayWorld();
+				return;
+			}
+			replayWorldHost = replaySession.worldHost();
+			source = replaySession.actions();
+		}
 		Path dir = sessionDir();
 		DatasetWriter writer = new DatasetWriter(dir, sampleHz, video);
-		Sampler s = new Sampler(sampleHz, actionReader, writer);
+		Sampler s = new Sampler(sampleHz, source, writer, replaySession);
 		VisionTap.setActive(VisionTap.Consumer.RECORDER, true); // bridges start publishing converted frames
 		InventoryActionTap.resetDropped();
-		InventoryActionTap.setActive(true); // the clickSlot mixin starts buffering slot clicks
+		InventoryActionTap.setActive(replaySession == null); // packet mode supplies decoded click edges itself
 		try {
 			s.start();
 		} catch (IOException e) {
 			VisionTap.setActive(VisionTap.Consumer.RECORDER, false);
 			InventoryActionTap.setActive(false);
+			if (replaySession != null) replaySession.close();
 			OpenCrafterLink.LOGGER.error("[open-crafter-link] failed to start recording in {}", dir, e);
+			if (replaySession != null) {
+				autoBatchHalted = true;
+				exitAutoReplayWorld();
+			}
 			return;
 		}
 		sampler = s;
+		replay = replaySession;
 		running = true;
+	}
+
+	/** Called at the beginning of every rendered world frame to advance an active packet timeline. */
+	public void onWorldRenderStart(MinecraftClient mc) {
+		PacketReplaySession session;
+		synchronized (this) { session = replay; }
+		if (session != null) session.onRenderStart(mc);
+	}
+
+	/** Substitute replay time at the start of Minecraft's render loop while eager capture is active. */
+	public long prepareRenderTime(long wallTimeMillis, MinecraftClient mc) {
+		PacketReplaySession session;
+		synchronized (this) { session = replay; }
+		return session == null ? wallTimeMillis : session.prepareRenderTime(wallTimeMillis, mc);
+	}
+
+	/** Advance packet-world bootstrap even while the vanilla loading screen prevents world rendering. */
+	public void onClientTick(MinecraftClient mc) {
+		PacketReplaySession session;
+		boolean launch = false;
+		synchronized (this) {
+			session = replay;
+			if (armed && autoReplay && !autoBatchHalted && !running && !autoWorldActive
+					&& !disconnectQueued && mc.world == null && mc.currentScreen instanceof TitleScreen
+					&& (finalizeThread == null || !finalizeThread.isAlive())) {
+				try {
+					launch = PacketRecordingReader.hasPending(REPLAY_INBOX);
+				} catch (IOException e) {
+					OpenCrafterLink.LOGGER.error("[open-crafter-link] cannot inspect replay inbox {}", REPLAY_INBOX, e);
+				}
+			}
+		}
+		if (session != null) session.onClientTick(mc);
+		if (launch) {
+			synchronized (this) {
+				if (armed && autoReplay && !running && !autoWorldActive) start();
+			}
+		}
+	}
+
+	/** Vision capture bypasses its wall-clock throttle only while eager packet replay owns the timeline. */
+	public synchronized boolean eagerCaptureActive() {
+		return running && replay != null && replay.eager();
+	}
+
+	/** Render capture calls this after it has a free GPU slot; one claim is granted per virtual sample. */
+	public synchronized boolean claimEagerCapture() {
+		return replay != null && replay.claimCapture();
+	}
+
+	public synchronized void releaseEagerCapture() {
+		if (replay != null) replay.releaseCapture();
+	}
+
+	private synchronized void onReplayFinished() {
+		if (running && replay != null) stopAsync();
 	}
 
 	/**
@@ -122,14 +238,81 @@ public final class Recorder {
 		InventoryActionTap.setActive(false);
 		Sampler s = sampler;
 		sampler = null;
+		PacketReplaySession replaySession = replay;
+		replay = null;
+		boolean archive = replaySession != null && replaySession.completedNaturally();
+		if (replaySession != null) replaySession.close(); // wakes an eager sampler waiting for a render
 		if (s == null) {
 			return;
 		}
 		SaveToast toast = new SaveToast(s.sessionName());
-		Thread t = new Thread(() -> toast.done(s.stop(toast::progress)), "ocl-recorder-finalize");
+		Thread t = new Thread(() -> {
+			SaveResult result = s.stop(toast::progress);
+			boolean archived = false;
+			if (archive && result != null && result.ok()) {
+				try { replaySession.archive(); archived = true; }
+				catch (IOException e) {
+					OpenCrafterLink.LOGGER.error("[open-crafter-link] dataset saved but packet input could not be archived", e);
+				}
+			}
+			toast.done(result);
+			boolean archivedFinal = archived;
+			if (replaySession != null) MinecraftClient.getInstance().execute(() -> afterReplayFinalized(archivedFinal));
+		}, "ocl-recorder-finalize");
 		t.setDaemon(true);
 		finalizeThread = t;
 		t.start();
+	}
+
+	/** Batch mode: after one input is durably encoded and archived, consume the next pending session. */
+	private synchronized void afterReplayFinalized(boolean archived) {
+		MinecraftClient mc = MinecraftClient.getInstance();
+		if (!archived || !armed || !autoReplay || !autoWorldActive || mc == null) {
+			if (!archived) autoBatchHalted = true;
+			exitAutoReplayWorld();
+			return;
+		}
+		// Each recording carries its own configuration/registry stream, so give the next input a fresh
+		// in-memory connection instead of trying to transition an existing PLAY connection backwards.
+		exitAutoReplayWorld();
+	}
+
+	/** Unload the client-only replay world. With no integrated server, this never displays “Saving world”. */
+	private synchronized void exitAutoReplayWorld() {
+		autoWorldActive = false;
+		MinecraftClient mc = MinecraftClient.getInstance();
+		if (mc == null) return;
+		if (mc.world != null) queueDisconnectToTitle(mc);
+		else {
+			closeReplayWorldHost();
+			if (!(mc.currentScreen instanceof TitleScreen)) mc.setScreen(new TitleScreen());
+		}
+	}
+
+	private synchronized void queueDisconnectToTitle(MinecraftClient mc) {
+		if (mc == null || disconnectQueued) return;
+		disconnectQueued = true;
+		mc.execute(() -> {
+			synchronized (Recorder.this) { disconnectQueued = false; }
+			if (mc.world != null) mc.disconnect(new TitleScreen(), false);
+			else mc.setScreen(new TitleScreen());
+			synchronized (Recorder.this) { closeReplayWorldHost(); }
+		});
+	}
+
+	private void closeReplayWorldHost() {
+		ReplayWorldHost host = replayWorldHost;
+		replayWorldHost = null;
+		if (host != null) host.close();
+	}
+
+	private boolean hasPendingReplay() {
+		try {
+			return PacketRecordingReader.hasPending(REPLAY_INBOX);
+		} catch (IOException e) {
+			OpenCrafterLink.LOGGER.error("[open-crafter-link] cannot inspect replay inbox {}", REPLAY_INBOX, e);
+			return false;
+		}
 	}
 
 	/**
@@ -139,6 +322,8 @@ public final class Recorder {
 	 */
 	public void shutdown() {
 		Sampler s;
+		PacketReplaySession replaySession;
+		boolean archive;
 		Thread inFlight;
 		synchronized (this) {
 			running = false;
@@ -146,11 +331,19 @@ public final class Recorder {
 			InventoryActionTap.setActive(false);
 			s = sampler;
 			sampler = null;
+			replaySession = replay;
+			replay = null;
+			archive = replaySession != null && replaySession.completedNaturally();
+			if (replaySession != null) replaySession.close();
 			inFlight = finalizeThread;
 			finalizeThread = null;
 		}
 		if (s != null) {
-			s.stop(null);
+			SaveResult result = s.stop(null);
+			if (archive && result != null && result.ok()) {
+				try { replaySession.archive(); }
+				catch (IOException e) { OpenCrafterLink.LOGGER.error("[open-crafter-link] failed to archive packet input", e); }
+			}
 		}
 		if (inFlight != null && inFlight.isAlive()) {
 			try {
@@ -159,10 +352,16 @@ public final class Recorder {
 				Thread.currentThread().interrupt();
 			}
 		}
+		synchronized (this) { closeReplayWorldHost(); }
 	}
 
 	private static Path sessionDir() {
-		Path root = FabricLoader.getInstance().getGameDir().resolve("open-crafter-link");
-		return root.resolve(LocalDateTime.now().format(STAMP));
+		Path root = OpenCrafterLink.PROFILE_DIR.resolve("recording");
+		String stamp = LocalDateTime.now().format(STAMP);
+		Path candidate = root.resolve(stamp);
+		for (int i = 1; java.nio.file.Files.exists(candidate); i++) {
+			candidate = root.resolve(stamp + "-" + i);
+		}
+		return candidate;
 	}
 }

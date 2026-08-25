@@ -14,6 +14,7 @@ import net.minecraft.client.gl.GlGpuBuffer;
 import net.minecraft.client.texture.GlTexture;
 
 import java.nio.ByteBuffer;
+import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
@@ -57,6 +58,9 @@ public final class VisionCapture {
 	private final IntSupplier targetHSupplier;
 	private final long minIntervalNs;
 	private final boolean boxFilter;
+	private final BooleanSupplier eagerCaptureActive;
+	private final BooleanSupplier claimEagerCapture;
+	private final Runnable releaseEagerCapture;
 
 	/** Target dimensions resolved once per drain so in-game settings changes take effect live. */
 	private int targetW;
@@ -115,12 +119,17 @@ public final class VisionCapture {
 	 *                the in-game camera setting take effect without restarting
 	 * @param targetH supplies the downsample target height in pixels (read live, as above)
 	 */
-	public VisionCapture(Supplier<LinkBridge> bridge, IntSupplier targetW, IntSupplier targetH, int maxHz, boolean boxFilter) {
+	public VisionCapture(Supplier<LinkBridge> bridge, IntSupplier targetW, IntSupplier targetH, int maxHz,
+			boolean boxFilter, BooleanSupplier eagerCaptureActive, BooleanSupplier claimEagerCapture,
+			Runnable releaseEagerCapture) {
 		this.bridge = bridge;
 		this.targetWSupplier = targetW;
 		this.targetHSupplier = targetH;
 		this.minIntervalNs = (maxHz > 0) ? (1_000_000_000L / maxHz) : 0L;
 		this.boxFilter = boxFilter;
+		this.eagerCaptureActive = eagerCaptureActive;
+		this.claimEagerCapture = claimEagerCapture;
+		this.releaseEagerCapture = releaseEagerCapture;
 	}
 
 	/**
@@ -165,17 +174,24 @@ public final class VisionCapture {
 			OpenCrafterLink.LOGGER.debug("[open-crafter-link] vision: HUD seam missed frame {}; reclaiming slot", armedSlot.frameId);
 			armedSlot.state = State.FREE;
 			armedSlot = null;
+			releaseEagerCapture.run();
 		}
 
-		// Throttle the rate at which we issue new captures — decided once, here, for both seams.
+		// Throttle ordinary capture. Eager replay instead grants exactly one capture per virtual sample;
+		// issuing more while an async GPU readback is in flight would let an old-state frame leak into
+		// the following sample window.
 		long now = System.nanoTime();
-		if (now - lastCaptureNs < minIntervalNs) {
+		boolean eager = eagerCaptureActive.getAsBoolean();
+		if (!eager && now - lastCaptureNs < minIntervalNs) {
 			return; // armedSlot already null: HUD seam will do nothing this frame
 		}
 
 		Slot slot = freeSlot();
 		if (slot == null) {
 			return; // all slots in flight — skip this frame rather than block the render thread
+		}
+		if (eager && !claimEagerCapture.getAsBoolean()) {
+			return;
 		}
 		lastCaptureNs = now;
 		slot.srcW = w;
@@ -218,12 +234,14 @@ public final class VisionCapture {
 		GpuTexture colorTex = (fb != null) ? fb.getColorAttachment() : null;
 		if (colorTex == null) {
 			slot.state = State.FREE; // abandon this frame; the depth copy already issued will simply be overwritten later
+			releaseEagerCapture.run();
 			return;
 		}
 		// The framebuffer changed size between the two seams (should not happen mid-frame): the depth PBO
 		// was sized for the old dimensions, so abandon rather than pair mismatched planes.
 		if (colorTex.getWidth(0) != slot.srcW || colorTex.getHeight(0) != slot.srcH) {
 			slot.state = State.FREE;
+			releaseEagerCapture.run();
 			return;
 		}
 
@@ -377,6 +395,7 @@ public final class VisionCapture {
 			return;
 		}
 		RenderSystem.assertOnRenderThread();
+		if (armedSlot != null) releaseEagerCapture.run();
 		closeRing();
 
 		long colorBytes = (long) w * h * 4; // RGBA8

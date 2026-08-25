@@ -51,7 +51,7 @@ public final class InventoryActionTap {
 	private InventoryActionTap() {}
 
 	/** Bounded like the bridges' action queue: clicks are rare, the cap only guards against a stalled sampler. */
-	private static final int CAPACITY = 64;
+	private static final int CAPACITY = 128;
 
 	/** Mapped actions awaiting the sampler drain. Client thread appends; sampler thread drains. */
 	private static final ConcurrentLinkedDeque<InventoryAction> QUEUE = new ConcurrentLinkedDeque<>();

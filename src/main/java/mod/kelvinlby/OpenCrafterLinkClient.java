@@ -16,6 +16,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.Identifier;
 
 import java.util.function.IntSupplier;
@@ -106,8 +107,12 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		// recorder if "Record dataset" was left enabled in a previous run; sessions are world-scoped —
 		// one starts on every world join (SP or MP) and finalizes (async, with a save-progress toast)
 		// on world leave, so title/menu screens are never recorded.
-		ClientTickEvents.END_CLIENT_TICK.register(recorder.actionReader()::onClientTick);
-		recorder.syncTo(cfg.recordDataset, cfg.recordSampleHz, cfg.toVideoSettings());
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			recorder.actionReader().onClientTick(client);
+			recorder.onClientTick(client);
+		});
+		recorder.syncTo(cfg.recordDataset, cfg.autoReplay, cfg.eagerPacketEncoding,
+				cfg.recordSampleHz, cfg.toVideoSettings());
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> recorder.onWorldJoin());
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> recorder.onWorldLeave());
 
@@ -128,9 +133,11 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		IntSupplier visionH = (LinkConfig.VISION_TARGET_H != null)
 				? LinkConfig.VISION_TARGET_H::intValue : () -> cfg.cameraHeight;
 		final VisionCapture vision = new VisionCapture(OpenCrafterLinkClient::bridge, visionW, visionH,
-				LinkConfig.VISION_MAX_HZ, LinkConfig.VISION_BOX_FILTER);
+				LinkConfig.VISION_MAX_HZ, LinkConfig.VISION_BOX_FILTER,
+				recorder::eagerCaptureActive, recorder::claimEagerCapture, recorder::releaseEagerCapture);
+		WorldRenderEvents.START_MAIN.register(ctx -> recorder.onWorldRenderStart(MinecraftClient.getInstance()));
 		WorldRenderEvents.END_MAIN.register(ctx -> vision.onWorldRenderEnd());
-		HudElementRegistry.addFirst(Identifier.of("open-crafter-link", "vision_capture"),
+		HudElementRegistry.addFirst(Identifier.of(OpenCrafterLink.MOD_ID, "vision_capture"),
 				(context, tickCounter) -> vision.onHudRenderFirst());
 
 		// Tear down on normal client stop. CLIENT_STOPPING runs on the render/main thread, so the GPU

@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * The latest {@link ActionSet} is published into a single-slot holder that the recorder's
  * {@code Sampler} thread reads, so the sampler never touches Minecraft state directly.
  */
-public final class ActionReader {
+public final class ActionReader implements SampleSource {
 
 	/** Latest observed action state. Client tick thread writes; sampler thread reads. */
 	private final AtomicReference<ActionSet> latest = new AtomicReference<>(ActionSet.NEUTRAL);
@@ -59,9 +59,19 @@ public final class ActionReader {
 		return latest.get();
 	}
 
+	@Override
+	public ActionSet sampleAt(long offsetMicros) {
+		return current();
+	}
+
 	/** The most recently observed inventory contents (never null; starts at {@link InventoryState#EMPTY}). */
 	public InventoryState currentInventory() {
 		return latestInventory.get();
+	}
+
+	@Override
+	public boolean drainLiveInventoryActions() {
+		return true;
 	}
 
 	private static ActionSet read(GameOptions opts, ClientPlayerEntity player) {

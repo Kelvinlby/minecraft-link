@@ -4,8 +4,13 @@
 	"package": "mod.kelvinlby.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"client": [
+		"ClientConnectionMixin",
+		"ClientPlayNetworkHandlerMixin",
 		"ClientPlayerEntityMixin",
 		"ClientPlayerInteractionManagerMixin",
+		"MinecraftClientAccessor",
+		"MinecraftClientRenderMixin",
+		"RenderTickCounterDynamicAccessor",
 		"RecipeBookScreenMixin"
 	],
 	"injectors": {

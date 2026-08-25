@@ -2,6 +2,8 @@ package mod.kelvinlby.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import mod.kelvinlby.OpenCrafterLink;
 import mod.kelvinlby.link.LinkConfig;
 import mod.kelvinlby.recorder.FfmpegEncoder;
@@ -37,7 +39,7 @@ public class OclConfig {
 
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static final Path PATH =
-			FabricLoader.getInstance().getConfigDir().resolve("open-crafter-link.json");
+			FabricLoader.getInstance().getConfigDir().resolve(OpenCrafterLink.MOD_ID + ".json");
 
 	private static OclConfig instance;
 
@@ -102,6 +104,10 @@ public class OclConfig {
 	 * taps the link's existing vision pipeline rather than rendering its own.
 	 */
 	public boolean recordDataset = false;
+	/** Automatically encode pending packet replays in a client-only in-memory world. */
+	public boolean autoReplay = false;
+	/** Run packet replay on a virtual sample clock, rendering/encoding as quickly as hardware allows. */
+	public boolean eagerPacketEncoding = false;
 	/** Recorder sample rate in Hz (aligned RGBD-frame + action-set samples per second). Default = one per vanilla tick. */
 	public int recordSampleHz = 20;
 	/**
@@ -141,8 +147,12 @@ public class OclConfig {
 	private static OclConfig load() {
 		if (Files.exists(PATH)) {
 			try (Reader reader = Files.newBufferedReader(PATH)) {
-				OclConfig loaded = GSON.fromJson(reader, OclConfig.class);
+				JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
+				OclConfig loaded = GSON.fromJson(json, OclConfig.class);
 				if (loaded != null) {
+					// One-time migration from the former two-value recording-source selector.
+					if (!json.has("autoReplay") && "PACKET_RECORDING".equals(json.has("recordingMode")
+							? json.get("recordingMode").getAsString() : null)) loaded.autoReplay = true;
 					return loaded;
 				}
 			} catch (IOException | RuntimeException e) {

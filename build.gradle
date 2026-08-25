@@ -36,6 +36,12 @@ dependencies {
 	// The dataset recorder's rgb.mp4 is encoded by a system-installed ffmpeg (piped rawvideo; see
 	// FfmpegEncoder) — no Java video dependency needed.
 
+	// Packet recordings produced by the companion server plugin default to independently-compressed
+	// Zstandard blocks. Include the JNI decoder so replay works from the distributed mod jar without
+	// requiring users to install another Fabric mod.
+	implementation "com.github.luben:zstd-jni:1.5.7-6"
+	include "com.github.luben:zstd-jni:1.5.7-6"
+
 	// Settings UI. Both are standalone mods the user installs separately, so `modImplementation`
 	// (not `include`) — bundling them via jar-in-jar would be wrong.
 	modImplementation "dev.isxander:yet-another-config-lib:${project.yacl_version}"
