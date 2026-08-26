@@ -111,7 +111,7 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 			recorder.actionReader().onClientTick(client);
 			recorder.onClientTick(client);
 		});
-		recorder.syncTo(cfg.recordDataset, cfg.autoReplay, cfg.eagerPacketEncoding,
+		recorder.syncTo(cfg.recordDataset, cfg.autoReplay, cfg.eagerPacketEncoding, cfg.quitWhenReplayFinished,
 				cfg.recordSampleHz, cfg.toVideoSettings());
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> recorder.onWorldJoin());
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> recorder.onWorldLeave());

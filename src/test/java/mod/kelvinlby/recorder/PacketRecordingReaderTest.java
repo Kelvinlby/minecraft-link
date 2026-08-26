@@ -31,22 +31,10 @@ class PacketRecordingReaderTest {
 		Path session = temp.resolve("session");
 		Files.createDirectories(session);
 		byte[] payload = records();
-		CRC32 crc = new CRC32(); crc.update(payload);
 		String header = "{\"formatVersion\":1,\"protocolVersion\":777,\"minecraftVersion\":\"test\","
 				+ "\"playerName\":\"Alex\",\"codecId\":0}";
 
-		ByteArrayOutputStream file = new ByteArrayOutputStream();
-		DataOutputStream out = new DataOutputStream(file);
-		out.write("MCREC1\n".getBytes(StandardCharsets.US_ASCII));
-		out.writeInt(header.getBytes(StandardCharsets.UTF_8).length);
-		out.write(header.getBytes(StandardCharsets.UTF_8));
-		out.writeByte(0xB1);
-		out.writeInt(payload.length);
-		out.writeInt(payload.length);
-		out.writeInt((int) crc.getValue());
-		out.writeLong(1_000L);
-		out.write(payload);
-		Files.write(session.resolve("0000.mcrec"), file.toByteArray());
+		writeSegment(session, header, payload, 1_000L);
 
 		try (PacketRecordingReader reader = PacketRecordingReader.openNext(temp)) {
 			assertNotNull(reader);
@@ -63,6 +51,64 @@ class PacketRecordingReaderTest {
 			assertArrayEquals(new byte[]{0x03}, second.data());
 			assertNull(reader.next()); // a crash-truncated segment without a trailer is recoverable
 		}
+	}
+
+	@Test
+	void identifiesTheSessionEndingDisconnectFromTheProtocolTable() throws Exception {
+		Path inbox = temp.resolve("inbox");
+		Path session = inbox.resolve("session");
+		Files.createDirectories(session);
+		String header = "{\"formatVersion\":1,\"protocolVersion\":777,\"minecraftVersion\":\"test\","
+				+ "\"playerName\":\"Alex\",\"codecId\":0,\"protocolTable\":"
+				+ "{\"PLAY/S2C\":{\"32\":\"DISCONNECT\",\"33\":\"ENTITY_RELATIVE_MOVE\"},"
+				+ "\"PLAY/C2S\":{\"32\":\"PLAYER_INPUT\"}}}";
+
+		ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+		bytes.write(8); writeVar(bytes, 0); writeVar(bytes, 1); bytes.write(33);   // S2C move
+		bytes.write(9); writeVar(bytes, 0); writeVar(bytes, 1); bytes.write(32);   // C2S sharing the id
+		bytes.write(8); writeVar(bytes, 0); writeVar(bytes, 1); bytes.write(32);   // S2C disconnect
+		writeSegment(session, header, bytes.toByteArray(), 0L);
+
+		try (PacketRecordingReader reader = PacketRecordingReader.openNext(inbox)) {
+			assertNotNull(reader);
+			assertFalse(reader.isDisconnect(reader.next()));
+			assertFalse(reader.isDisconnect(reader.next())); // ids are direction-scoped
+			assertTrue(reader.isDisconnect(reader.next()));
+		}
+	}
+
+	@Test
+	void withoutAProtocolTableNoRecordIsTreatedAsADisconnect() throws Exception {
+		Path inbox = temp.resolve("inbox");
+		Path session = inbox.resolve("session");
+		Files.createDirectories(session);
+		String header = "{\"formatVersion\":1,\"protocolVersion\":777,\"minecraftVersion\":\"test\","
+				+ "\"playerName\":\"Alex\",\"codecId\":0}";
+
+		ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+		bytes.write(8); writeVar(bytes, 0); writeVar(bytes, 1); bytes.write(32);
+		writeSegment(session, header, bytes.toByteArray(), 0L);
+
+		try (PacketRecordingReader reader = PacketRecordingReader.openNext(inbox)) {
+			assertNotNull(reader);
+			assertFalse(reader.isDisconnect(reader.next()));
+		}
+	}
+
+	private static void writeSegment(Path session, String header, byte[] payload, long blockTime) throws Exception {
+		CRC32 crc = new CRC32(); crc.update(payload);
+		ByteArrayOutputStream file = new ByteArrayOutputStream();
+		DataOutputStream out = new DataOutputStream(file);
+		out.write("MCREC1\n".getBytes(StandardCharsets.US_ASCII));
+		out.writeInt(header.getBytes(StandardCharsets.UTF_8).length);
+		out.write(header.getBytes(StandardCharsets.UTF_8));
+		out.writeByte(0xB1);
+		out.writeInt(payload.length);
+		out.writeInt(payload.length);
+		out.writeInt((int) crc.getValue());
+		out.writeLong(blockTime);
+		out.write(payload);
+		Files.write(session.resolve("0000.mcrec"), file.toByteArray());
 	}
 
 	private static byte[] records() throws Exception {

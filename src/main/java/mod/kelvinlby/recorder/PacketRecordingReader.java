@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.CRC32;
@@ -49,6 +50,8 @@ public final class PacketRecordingReader implements Closeable {
 	private Segment current;
 	private Header header;
 	private final long estimatedEndMicros;
+	/** Per-phase S2C {@code DISCONNECT} ids from the recorded protocol table; built on first use. */
+	private EnumMap<Phase, Integer> disconnectIds;
 
 	private PacketRecordingReader(Path source, List<Path> segments) throws IOException {
 		this.source = source;
@@ -148,8 +151,52 @@ public final class PacketRecordingReader implements Closeable {
 
 	public Header header() { return header; }
 	public Path source() { return source; }
+
 	/** Last session-clock timestamp from session.json, or -1 for a standalone/unindexed input. */
 	public long estimatedEndMicros() { return estimatedEndMicros; }
+
+	/**
+	 * Whether this record is the server's session-ending {@code DISCONNECT}. Replay must never apply
+	 * one: vanilla would close the replay connection and unload the client world before the timeline
+	 * reached its final sample, so the input could not complete (and would never be archived).
+	 * Resolved from the recorded protocol table; unknown when the recorder omitted that table.
+	 */
+	public boolean isDisconnect(Rec rec) {
+		if (rec.direction() != Direction.S2C) return false;
+		Integer id = disconnectId(rec.phase());
+		return id != null && id == packetId(rec.data());
+	}
+
+	private Integer disconnectId(Phase phase) {
+		if (disconnectIds == null) {
+			disconnectIds = new EnumMap<>(Phase.class);
+			Map<String, Map<String, String>> table = header.protocolTable;
+			if (table != null) {
+				for (Phase p : Phase.values()) {
+					Map<String, String> ids = table.get(p.name() + "/S2C");
+					if (ids == null) continue;
+					for (Map.Entry<String, String> entry : ids.entrySet()) {
+						if (!"DISCONNECT".equalsIgnoreCase(entry.getValue())) continue;
+						try { disconnectIds.put(p, Integer.valueOf(entry.getKey().trim())); }
+						catch (NumberFormatException ignored) { /* a non-numeric table key is not an id */ }
+						break;
+					}
+				}
+			}
+		}
+		return disconnectIds.get(phase);
+	}
+
+	/** Leading varint packet id of a raw payload, or -1 when it is empty or malformed. */
+	private static int packetId(byte[] data) {
+		int value = 0;
+		for (int i = 0, shift = 0; i < data.length && shift < 35; i++, shift += 7) {
+			int b = data[i] & 255;
+			value |= (b & 127) << shift;
+			if ((b & 128) == 0) return value;
+		}
+		return -1;
+	}
 
 	public Rec next() throws IOException {
 		while (current != null) {

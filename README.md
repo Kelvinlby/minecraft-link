@@ -145,11 +145,17 @@ the mod unloads the replay world and returns to the title screen.
 
 After replay and dataset finalization both succeed, the input file/session directory is moved to
 `replay/done/`; interrupted, incompatible, or failed inputs stay in the inbox for diagnosis
-and retry. `Eager packet encoding` replaces wall-clock pacing with one virtual sample interval per
+and retry. `Eager encoding` replaces wall-clock pacing with one virtual sample interval per
 completed GPU capture, temporarily disables VSync and raises the client FPS cap, and blocks on encoder
 backpressure. Thus it changes only processing speed: output timestamps and MP4 FPS still follow the
 configured **Sample rate**. A top-right progress toast tracks indexed session progress; it is drawn
 after the recorder's pre-HUD RGB capture seam and therefore never appears in RGB or depth output.
+
+`Quit when finished` closes the game as soon as the batch has nothing left to run, which lets an
+external runner treat the process exit as "this instance is done" and start the next one — useful for
+driving several Minecraft instances in parallel. The game also exits when a failed input halts the
+batch, since it can make no further progress on its own; an inbox that is *not* empty after the exit
+(plus the halt line in the log) is what distinguishes that from a clean finish.
 
 RGB is encoded to `rgb.mp4` through a **system-installed FFmpeg** (configurable codec/quality/keyframe
 interval and GPU-vs-CPU backend); actions and depth are still written even when no ffmpeg binary is
@@ -159,7 +165,8 @@ found.
 |---------|---------|--------|
 | **Record dataset** | `false` | Arm world-scoped dataset recording |
 | **Auto replay** | `false` | Automatically encode every pending replay in a private world |
-| **Eager packet encoding** | `false` | Auto replay: render/encode on a virtual clock as fast as the GPU and encoder allow |
+| **Eager encoding** | `false` | Auto replay: render/encode on a virtual clock as fast as the GPU and encoder allow |
+| **Quit game when finished** | `false` | Auto replay: exit the game once the inbox has nothing left to process, so a batch runner can wait on the process |
 | **Sample rate** | `20` Hz | Aligned samples per second (20 = one per tick) |
 | **Disable recipe book while recording** | `true` | Force manual crafting, so a recipe-book click can't fill the grid as one opaque action |
 | **Encoder backend** | `AUTO` | `AUTO` (GPU→CPU), `GPU`, or `CPU` ffmpeg encoding |

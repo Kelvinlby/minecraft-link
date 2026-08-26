@@ -108,6 +108,11 @@ public class OclConfig {
 	public boolean autoReplay = false;
 	/** Run packet replay on a virtual sample clock, rendering/encoding as quickly as hardware allows. */
 	public boolean eagerPacketEncoding = false;
+	/**
+	 * Auto replay only: close the game once the replay inbox has nothing left to process, so a batch
+	 * runner can treat the process exit as "this instance is done" and schedule the next one.
+	 */
+	public boolean quitWhenReplayFinished = false;
 	/** Recorder sample rate in Hz (aligned RGBD-frame + action-set samples per second). Default = one per vanilla tick. */
 	public int recordSampleHz = 20;
 	/**

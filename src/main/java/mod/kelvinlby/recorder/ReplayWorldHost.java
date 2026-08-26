@@ -6,12 +6,14 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
+import mod.kelvinlby.OpenCrafterLink;
 import mod.kelvinlby.mixin.MinecraftClientAccessor;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.TitleScreen;
 import net.minecraft.client.network.ClientLoginNetworkHandler;
 import net.minecraft.client.world.ClientChunkLoadProgress;
 import net.minecraft.network.ClientConnection;
+import net.minecraft.network.DisconnectionInfo;
 import net.minecraft.network.NetworkSide;
 import net.minecraft.network.handler.NetworkStateTransitions;
 import net.minecraft.network.packet.s2c.login.LoginSuccessS2CPacket;
@@ -38,6 +40,14 @@ final class ReplayWorldHost implements AutoCloseable {
 		this.connection = new ClientConnection(NetworkSide.CLIENTBOUND) {
 			@Override public void exceptionCaught(ChannelHandlerContext context, Throwable error) {
 				pipelineFailure = error;
+			}
+			@Override public void disconnect(DisconnectionInfo info) {
+				// Both disconnect() overloads funnel here. While the recording is still being fed, nothing
+				// may close this connection: vanilla would unload the client world mid-timeline and the
+				// replay could never finish. The session ends by closing this host instead.
+				if (closed) { super.disconnect(info); return; }
+				OpenCrafterLink.LOGGER.warn("[open-crafter-link] ignoring replay connection disconnect: {}",
+						info.reason().getString());
 			}
 		};
 		this.channel = new EmbeddedChannel();

@@ -253,6 +253,13 @@ final class PacketReplaySession implements AutoCloseable {
 	@SuppressWarnings({"rawtypes", "unchecked"})
 	private void decodeAndApply(PacketRecordingReader.Rec rec, long replayMicros, MinecraftClient mc) {
 		if (rec.direction() == PacketRecordingReader.Direction.S2C) {
+			if (reader.isDisconnect(rec)) {
+				// A capture that ended with the player being disconnected records the server's final
+				// DISCONNECT. Applying it unloads the replay world before the timeline renders its last
+				// sample, which would strand an otherwise complete input in the inbox.
+				OpenCrafterLink.LOGGER.info("[open-crafter-link] recorded disconnect at {} us ends the packet stream", replayMicros);
+				return;
+			}
 			worldHost.acceptS2c(rec.data());
 			if (rec.phase() == PacketRecordingReader.Phase.PLAY && mc.world != null && mc.player != null) {
 				sawGameJoin = true;

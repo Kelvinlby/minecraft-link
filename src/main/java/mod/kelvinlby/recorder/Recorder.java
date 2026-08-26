@@ -49,6 +49,7 @@ public final class Recorder {
 	private boolean armed;
 	private boolean autoReplay;
 	private boolean eagerPacketEncoding;
+	private boolean quitWhenFinished;
 	private int sampleHz = 20;
 	private FfmpegEncoder.Settings video;
 
@@ -57,6 +58,8 @@ public final class Recorder {
 	private boolean autoWorldActive;
 	private boolean autoBatchHalted;
 	private boolean disconnectQueued;
+	/** Set once the quit-when-finished shutdown has been scheduled, so it is requested exactly once. */
+	private boolean quitScheduled;
 
 	/** The action reader to register on a client-tick event; it observes the human's live inputs. */
 	public ActionReader actionReader() {
@@ -72,13 +75,18 @@ public final class Recorder {
 	 * Reconcile to the config: arm/disarm world-scoped recording, and — when the player is already in
 	 * a world — start or finalize a session right away so the settings toggle acts immediately.
 	 * Called at init (where no world exists yet, so it only arms) and after each settings save.
+	 *
+	 * <p>{@code quitWhenFinished} makes an auto-replay instance close itself once the inbox holds
+	 * nothing more to process, so an external batch runner can use the process exit as the completion
+	 * signal for that instance.
 	 */
-	public synchronized void syncTo(boolean enabled, boolean autoReplay,
-			boolean eagerEncoding, int hz, FfmpegEncoder.Settings videoSettings) {
+	public synchronized void syncTo(boolean enabled, boolean autoReplay, boolean eagerEncoding,
+			boolean quitWhenFinished, int hz, FfmpegEncoder.Settings videoSettings) {
 		this.armed = enabled;
 		this.autoReplay = autoReplay;
 		this.autoBatchHalted = false; // an explicit settings save/reload permits retrying a failed input
 		this.eagerPacketEncoding = eagerEncoding;
+		this.quitWhenFinished = quitWhenFinished;
 		this.sampleHz = hz;
 		this.video = videoSettings;
 		MinecraftClient mc = MinecraftClient.getInstance(); // null during client construction (mod init)
@@ -141,7 +149,14 @@ public final class Recorder {
 				return;
 			}
 			if (replaySession == null) {
-				OpenCrafterLink.LOGGER.info("[open-crafter-link] auto replay complete; {} is empty", REPLAY_INBOX);
+				// The queue probe that launched this world found a candidate. If none of them opens, the
+				// probe would keep re-launching forever, so treat an unreadable inbox as a halt instead.
+				if (hasPendingReplay()) {
+					OpenCrafterLink.LOGGER.error("[open-crafter-link] auto replay halted: no readable session in {}", REPLAY_INBOX);
+					autoBatchHalted = true;
+				} else {
+					OpenCrafterLink.LOGGER.info("[open-crafter-link] auto replay complete; {} is empty", REPLAY_INBOX);
+				}
 				exitAutoReplayWorld();
 				return;
 			}
@@ -190,20 +205,37 @@ public final class Recorder {
 	public void onClientTick(MinecraftClient mc) {
 		PacketReplaySession session;
 		boolean launch = false;
+		String quitReason = null;
 		synchronized (this) {
 			session = replay;
-			if (armed && autoReplay && !autoBatchHalted && !running && !autoWorldActive
+			// Between inputs the batch rests on the title screen with nothing in flight; that is the only
+			// point at which the queue may be re-probed, and the only safe point at which to quit.
+			if (armed && autoReplay && !running && !autoWorldActive && !quitScheduled
 					&& !disconnectQueued && mc.world == null && mc.currentScreen instanceof TitleScreen
 					&& (finalizeThread == null || !finalizeThread.isAlive())) {
+				boolean pending = false;
+				boolean probed = true;
 				try {
-					launch = PacketRecordingReader.hasPending(REPLAY_INBOX);
+					pending = PacketRecordingReader.hasPending(REPLAY_INBOX);
 				} catch (IOException e) {
+					probed = false; // an unreadable inbox is an unknown queue state, not an empty one
 					OpenCrafterLink.LOGGER.error("[open-crafter-link] cannot inspect replay inbox {}", REPLAY_INBOX, e);
+				}
+				launch = pending && !autoBatchHalted;
+				if (probed && !launch && quitWhenFinished) {
+					// A halted batch is finished too: it cannot make further progress on its own, and a
+					// runner waiting on the process would otherwise wait forever. The inbox tells the two
+					// outcomes apart — an empty one means every input was encoded and archived.
+					quitReason = autoBatchHalted ? "halted on a failed input" : "inbox empty";
+					quitScheduled = true;
 				}
 			}
 		}
 		if (session != null) session.onClientTick(mc);
-		if (launch) {
+		if (quitReason != null) {
+			OpenCrafterLink.LOGGER.info("[open-crafter-link] auto replay finished ({}); quitting the game", quitReason);
+			mc.scheduleStop();
+		} else if (launch) {
 			synchronized (this) {
 				if (armed && autoReplay && !running && !autoWorldActive) start();
 			}

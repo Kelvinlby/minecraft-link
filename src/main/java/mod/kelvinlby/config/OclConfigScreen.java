@@ -116,7 +116,8 @@ public final class OclConfigScreen {
 					cfg.save();
 					OpenCrafterLinkClient.reloadLink();
 					OpenCrafterLinkClient.recorder().syncTo(cfg.recordDataset, cfg.autoReplay,
-							cfg.eagerPacketEncoding, cfg.recordSampleHz, cfg.toVideoSettings());
+							cfg.eagerPacketEncoding, cfg.quitWhenReplayFinished,
+							cfg.recordSampleHz, cfg.toVideoSettings());
 					OpenCrafterLinkClient.virtualCamera().syncTo(cfg.virtualCameraRgb, cfg.virtualCameraDepth,
 							cfg.cameraWidth, cfg.cameraHeight, LinkConfig.VISION_MAX_HZ, cfg.ffmpegPath);
 				})
@@ -232,7 +233,7 @@ public final class OclConfigScreen {
 				.available(cfg.recordDataset)
 				.build();
 		Option<Boolean> eager = Option.<Boolean>createBuilder()
-				.name(Text.literal("Eager packet encoding"))
+				.name(Text.literal("Eager encoding"))
 				.description(OptionDescription.of(Text.literal(
 						"Auto replay only. Advances one configured output-sample interval per completed render "
 								+ "and temporarily removes VSync/FPS caps. This changes throughput, not the dataset "
@@ -242,7 +243,22 @@ public final class OclConfigScreen {
 				.controller(TickBoxControllerBuilder::create)
 				.available(cfg.recordDataset && cfg.autoReplay)
 				.build();
-		autoReplay.addListener((option, value) -> eager.setAvailable(option.available() && value));
+		Option<Boolean> quitWhenFinished = Option.<Boolean>createBuilder()
+				.name(Text.literal("Quit game when finished"))
+				.description(OptionDescription.of(Text.literal(
+						"Auto replay only. Close the game once the replay inbox has nothing left to process, so "
+								+ "a batch runner can treat the process exit as \"this instance is done\" and start the "
+								+ "next one. The game also exits if a failed input halts the batch — an inbox that is "
+								+ "not empty afterwards is what tells the two apart.")))
+				.binding(defaults.quitWhenReplayFinished,
+						() -> cfg.quitWhenReplayFinished, v -> cfg.quitWhenReplayFinished = v)
+				.controller(TickBoxControllerBuilder::create)
+				.available(cfg.recordDataset && cfg.autoReplay)
+				.build();
+		autoReplay.addListener((option, value) -> {
+			eager.setAvailable(option.available() && value);
+			quitWhenFinished.setAvailable(option.available() && value);
+		});
 
 		Option<Boolean> enabled = Option.<Boolean>createBuilder()
 						.name(Text.literal("Record dataset"))
@@ -261,12 +277,14 @@ public final class OclConfigScreen {
 		enabled.addListener((option, value) -> {
 			autoReplay.setAvailable(value);
 			eager.setAvailable(value && autoReplay.pendingValue());
+			quitWhenFinished.setAvailable(value && autoReplay.pendingValue());
 		});
 
 		return cat
 				.option(enabled)
 				.option(autoReplay)
 				.option(eager)
+				.option(quitWhenFinished)
 				.option(Option.<Boolean>createBuilder()
 						.name(Text.literal("Disable recipe book while recording"))
 						.description(OptionDescription.of(Text.literal(
