@@ -3,7 +3,9 @@ package mod.kelvinlby.recorder;
 import net.minecraft.network.ClientConnection;
 import net.minecraft.network.NetworkSide;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.c2s.play.BoatPaddleStateC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
+import net.minecraft.network.packet.c2s.play.VehicleMoveC2SPacket;
 import net.minecraft.network.packet.s2c.common.CommonPingS2CPacket;
 import net.minecraft.network.packet.s2c.common.KeepAliveS2CPacket;
 
@@ -45,8 +47,11 @@ public final class ReplayOutboundGuard {
 		// C2S projection can likewise invoke item helpers that send. Neither belongs on the host link.
 		if (isolatedDepth.get() > 0) return true;
 		// Vanilla continues ticking the projected player between replay frames. Never let those newly
-		// synthesized coordinates reach the real/fake world that merely hosts the replay client.
-		return packet instanceof PlayerMoveC2SPacket;
+		// synthesized coordinates reach the real/fake world that merely hosts the replay client. A
+		// ridden vehicle emits its own position and paddle state from that same tick.
+		return packet instanceof PlayerMoveC2SPacket
+				|| packet instanceof VehicleMoveC2SPacket
+				|| packet instanceof BoatPaddleStateC2SPacket;
 	}
 
 	/**

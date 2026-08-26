@@ -5,6 +5,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.c2s.play.BoatPaddleStateC2SPacket;
 import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
 import net.minecraft.network.packet.c2s.play.CloseHandledScreenC2SPacket;
 import net.minecraft.network.packet.c2s.play.CreativeInventoryActionC2SPacket;
@@ -14,8 +15,11 @@ import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
+import net.minecraft.network.packet.c2s.play.VehicleMoveC2SPacket;
 import net.minecraft.block.BlockState;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityPose;
+import net.minecraft.entity.vehicle.AbstractBoatEntity;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
@@ -30,6 +34,9 @@ import java.util.Objects;
  * mutations back to the same client. Applying only the recorded S2C stream leaves the replay camera,
  * first-person hands, and predicted block-breaking overlay stale, so this class performs those local
  * mutations at the original packet time.
+ *
+ * <p>While the player is riding, the position lives in {@code VehicleMoveC2SPacket} instead, and the
+ * vehicle carries a rotation of its own; {@link ReplayVehicleAnchor} owns that half.
  */
 final class PacketPlayerProjector {
 	private static final long TICK_MICROS = 50_000L;
@@ -44,6 +51,12 @@ final class PacketPlayerProjector {
 		try {
 			if (packet instanceof PlayerMoveC2SPacket p) {
 				projectMove(p, player);
+			} else if (packet instanceof VehicleMoveC2SPacket p) {
+				projectVehicleMove(p, player);
+			} else if (packet instanceof BoatPaddleStateC2SPacket p) {
+				if (player.getControllingVehicle() instanceof AbstractBoatEntity boat) {
+					boat.setPaddlesMoving(p.isLeftPaddling(), p.isRightPaddling());
+				}
 			} else if (packet instanceof PlayerInputC2SPacket p) {
 				// isSneaking() and first-person pose decisions read this value directly.
 				player.input.playerInput = p.input();
@@ -92,6 +105,7 @@ final class PacketPlayerProjector {
 			return;
 		}
 		clearBreaking(mc);
+		ReplayVehicleAnchor.clear();
 	}
 
 	private static void projectMove(PlayerMoveC2SPacket packet, ClientPlayerEntity player) {
@@ -110,6 +124,18 @@ final class PacketPlayerProjector {
 		}
 		player.setOnGround(packet.isOnGround());
 		player.horizontalCollision = packet.horizontalCollision();
+		// Riding sends look separately from the vehicle's own transform, and the vehicle's tick would
+		// rotate this freshly recorded look away again before the frame is drawn.
+		ReplayVehicleAnchor.noteRiderLook(player);
+	}
+
+	private static void projectVehicleMove(VehicleMoveC2SPacket packet, ClientPlayerEntity player) {
+		Entity vehicle = player.getRootVehicle();
+		// A recorded vehicle move can outlive its dismount by a packet; the S2C passenger update that
+		// ended the ride is authoritative, so there is nothing left to drive.
+		if (vehicle == player) return;
+		ReplayVehicleAnchor.anchor(vehicle, packet.position(), packet.yaw(), packet.pitch(),
+				packet.onGround(), player);
 	}
 
 	private static void projectClick(ClickSlotC2SPacket packet, ClientPlayerEntity player) {

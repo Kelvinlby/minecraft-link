@@ -127,7 +127,10 @@ final class PacketReplaySession implements AutoCloseable {
 	public void onClientTick(MinecraftClient mc) {
 		Runnable callback = null;
 		synchronized (this) {
-			if (closed || captureReady) return;
+			if (closed) return;
+			// End of the client tick: vanilla has just ticked (and locally rotated) any ridden vehicle.
+			ReplayVehicleAnchor.reassert(mc);
+			if (captureReady) return;
 			bootstrapMicros += 1_000_000L; // consume one recorded second per client tick while loading
 			advanceTo(bootstrapMicros, mc);
 			actions.refreshObservation(mc);
