@@ -12,6 +12,7 @@ import net.minecraft.network.packet.c2s.play.CreativeInventoryActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInputC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
@@ -43,6 +44,8 @@ final class PacketPlayerProjector {
 	private BlockPos breakingPos;
 	private float breakingProgress;
 	private long lastBreakingTickMicros;
+	/** True only while replay, rather than a physical input event, owns the effective use-key level. */
+	private boolean projectedUseKey;
 
 	void accept(Packet<?> packet, long replayMicros, MinecraftClient mc) {
 		ClientPlayerEntity player = mc.player;
@@ -75,8 +78,10 @@ final class PacketPlayerProjector {
 				// The two-argument LivingEntity method animates locally; ClientPlayerEntity's
 				// network-sending override only exists for the one-argument overload.
 				player.swingHand(p.getHand(), false);
+			} else if (packet instanceof PlayerInteractBlockC2SPacket p) {
+				projectInteractBlock(p, mc, player);
 			} else if (packet instanceof PlayerInteractItemC2SPacket p) {
-				projectInteractItem(p, player);
+				projectInteractItem(p, mc, player);
 			} else if (packet instanceof CloseHandledScreenC2SPacket p
 					&& player.currentScreenHandler.syncId == p.getSyncId()) {
 				player.closeScreen();
@@ -91,6 +96,11 @@ final class PacketPlayerProjector {
 
 	/** Advance the client-predicted crack overlay on the same 20 TPS virtual clock as replay. */
 	void advanceTo(long replayMicros, MinecraftClient mc) {
+		// ClientPlayerEntity's active-item flag alone is not enough to preserve an eating, drawing,
+		// blocking, charging, brushing, etc. animation. MinecraftClient.handleInputEvents() cancels it
+		// on the following tick unless the real use KeyBinding is still pressed. Release our synthetic
+		// level as soon as the projected use ends naturally, or an S2C update clears it.
+		reconcileUseKey(mc);
 		if (breakingPos == null || mc.world == null || mc.player == null) return;
 		while (lastBreakingTickMicros + TICK_MICROS <= replayMicros && breakingPos != null) {
 			lastBreakingTickMicros += TICK_MICROS;
@@ -105,6 +115,7 @@ final class PacketPlayerProjector {
 			return;
 		}
 		clearBreaking(mc);
+		releaseUseKey(mc);
 		ReplayVehicleAnchor.clear();
 	}
 
@@ -155,7 +166,10 @@ final class PacketPlayerProjector {
 			case ABORT_DESTROY_BLOCK, STOP_DESTROY_BLOCK -> clearBreaking(mc);
 			case DROP_ITEM -> drop(player, false);
 			case DROP_ALL_ITEMS -> drop(player, true);
-			case RELEASE_USE_ITEM -> player.clearActiveItem();
+			case RELEASE_USE_ITEM -> {
+				player.clearActiveItem();
+				releaseUseKey(mc);
+			}
 			default -> { }
 		}
 	}
@@ -194,7 +208,17 @@ final class PacketPlayerProjector {
 		lastBreakingTickMicros = 0L;
 	}
 
-	private static void projectInteractItem(PlayerInteractItemC2SPacket packet, ClientPlayerEntity player) {
+	private void projectInteractBlock(PlayerInteractBlockC2SPacket packet, MinecraftClient mc,
+			ClientPlayerEntity player) {
+		if (mc.interactionManager == null || mc.world == null) return;
+		// Re-run vanilla's local prediction (block action followed by useOnBlock when appropriate).
+		// The surrounding ReplayOutboundGuard isolation swallows the sequenced packet this produces.
+		mc.interactionManager.interactBlock(player, packet.getHand(), packet.getBlockHitResult());
+		reconcileUseKey(mc);
+	}
+
+	private void projectInteractItem(PlayerInteractItemC2SPacket packet, MinecraftClient mc,
+			ClientPlayerEntity player) {
 		player.setAngles(packet.getYaw(), packet.getPitch());
 		if (player.isSpectator()) return;
 
@@ -210,6 +234,25 @@ final class PacketPlayerProjector {
 				? Objects.requireNonNullElseGet(success.getNewHandStack(), () -> player.getStackInHand(hand))
 				: player.getStackInHand(hand);
 		if (newStack != oldStack) player.setStackInHand(hand, newStack);
+		reconcileUseKey(mc);
+	}
+
+	/** Mirror a continuous projected item use onto the effective input level vanilla polls each tick. */
+	private void reconcileUseKey(MinecraftClient mc) {
+		if (mc.player != null && mc.player.isUsingItem()) {
+			// Write the effective level directly. Calling setPressed would incorrectly toggle a
+			// StickyKeyBinding and queueing timesPressed would replay the interaction a second time.
+			mc.options.useKey.pressed = true;
+			projectedUseKey = true;
+		} else {
+			releaseUseKey(mc);
+		}
+	}
+
+	private void releaseUseKey(MinecraftClient mc) {
+		if (!projectedUseKey) return;
+		mc.options.useKey.pressed = false;
+		projectedUseKey = false;
 	}
 
 	private static void drop(ClientPlayerEntity player, boolean entireStack) {
