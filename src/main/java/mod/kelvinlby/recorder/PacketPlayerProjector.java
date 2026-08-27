@@ -58,7 +58,7 @@ final class PacketPlayerProjector {
 				projectVehicleMove(p, player);
 			} else if (packet instanceof BoatPaddleStateC2SPacket p) {
 				if (player.getControllingVehicle() instanceof AbstractBoatEntity boat) {
-					boat.setPaddlesMoving(p.isLeftPaddling(), p.isRightPaddling());
+					ReplayVehicleAnchor.notePaddles(boat, p.isLeftPaddling(), p.isRightPaddling());
 				}
 			} else if (packet instanceof PlayerInputC2SPacket p) {
 				// isSneaking() and first-person pose decisions read this value directly.

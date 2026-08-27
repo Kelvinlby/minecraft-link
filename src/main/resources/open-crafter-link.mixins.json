@@ -4,6 +4,7 @@
 	"package": "mod.kelvinlby.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"client": [
+		"AbstractBoatEntityMixin",
 		"ClientConnectionMixin",
 		"ClientPlayNetworkHandlerMixin",
 		"ClientPlayerEntityMixin",

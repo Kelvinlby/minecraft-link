@@ -3,6 +3,7 @@ package mod.kelvinlby.recorder;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.vehicle.AbstractBoatEntity;
 import net.minecraft.util.math.Vec3d;
 
 /**
@@ -41,6 +42,9 @@ public final class ReplayVehicleAnchor {
 	private static float riderYaw;
 	private static float riderPitch;
 	private static float riderHeadYaw;
+	private static AbstractBoatEntity paddleBoat;
+	private static boolean leftPaddle;
+	private static boolean rightPaddle;
 
 	/** Adopt one recorded {@code VehicleMoveC2SPacket} and apply it immediately. */
 	static void anchor(Entity vehicle, Vec3d pos, float yaw, float pitch, boolean onGround,
@@ -65,6 +69,30 @@ public final class ReplayVehicleAnchor {
 		riderHeadYaw = rider.getHeadYaw();
 	}
 
+	/**
+	 * Retain the last recorded paddle level. A controlled boat recomputes this state from the physical
+	 * keyboard in {@code updatePaddles} every client tick, so setting its tracked booleans only when the
+	 * packet arrives is not enough: replay's idle keyboard clears them before the boat is rendered.
+	 */
+	static void notePaddles(AbstractBoatEntity boat, boolean left, boolean right) {
+		paddleBoat = boat;
+		leftPaddle = left;
+		rightPaddle = right;
+		boat.setPaddlesMoving(left, right);
+	}
+
+	/**
+	 * Restore input immediately before vanilla derives the tracked paddle flags and advances the
+	 * paddle phases. This preserves vanilla's own animation clock rather than fabricating render angles.
+	 */
+	public static void preparePaddleTick(AbstractBoatEntity boat) {
+		if (!ReplayOutboundGuard.isActive() || boat != paddleBoat) return;
+		// A lone left paddle is produced by steering right, and vice versa; both means forward.
+		boolean forward = leftPaddle && rightPaddle;
+		boat.setInputs(rightPaddle && !leftPaddle, leftPaddle && !rightPaddle, forward, false);
+		boat.setPaddlesMoving(leftPaddle, rightPaddle);
+	}
+
 	/** Re-apply the anchored transform after vanilla has ticked the world. */
 	static void reassert(MinecraftClient mc) {
 		Entity anchored = vehicle;
@@ -84,6 +112,10 @@ public final class ReplayVehicleAnchor {
 
 	static void clear() {
 		vehicle = null;
+		if (paddleBoat != null) paddleBoat.setInputs(false, false, false, false);
+		paddleBoat = null;
+		leftPaddle = false;
+		rightPaddle = false;
 	}
 
 	private static void apply(ClientPlayerEntity rider) {
