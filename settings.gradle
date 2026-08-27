@@ -11,3 +11,5 @@ pluginManagement {
 
 // Should match your modid
 rootProject.name = 'open-crafter-link'
+
+include 'ocl-core', 'ocl-recorder'

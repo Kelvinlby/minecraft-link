@@ -1,122 +1,56 @@
 plugins {
-	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
-	id 'maven-publish'
+	id 'base'
+	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}" apply false
 }
 
-version = project.mod_version
-group = project.maven_group
-
-loom {
-	// VisionCapture reaches GlGpuBuffer.id to bind the depth read-back PBO for its own glReadPixels.
-	accessWidenerPath = file("src/main/resources/open-crafter-link.accesswidener")
+allprojects {
+	version = project.mod_version
+	group = project.maven_group
 }
 
-repositories {
-	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-	// Maven Central (which Loom does not add by default) provides JUnit for the golden test.
-	mavenCentral()
-
-	// YACL (settings library) and Mod Menu (the screen entry point) are hosted on their own mavens.
-	maven { name = 'Xander'; url = 'https://maven.isxander.dev/releases' }
-	maven { name = 'TerraformersMC'; url = 'https://maven.terraformersmc.com/releases' }
+tasks.register('buildCore') {
+	group = 'build'
+	description = 'Build only the Open Crafter Link core mod.'
+	dependsOn ':ocl-core:build'
 }
 
-dependencies {
-	// To change the versions see the gradle.properties file
-	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-
-	// Fabric API. This is technically optional, but you probably want it anyway.
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
-
-	// The link speaks plain TCP / AF_UNIX with length-prefixed framing (see AbstractLinkBridge), so
-	// there is no ZeroMQ / native-socket dependency to bundle.
-
-	// The dataset recorder's rgb.mp4 is encoded by a system-installed ffmpeg (piped rawvideo; see
-	// FfmpegEncoder) — no Java video dependency needed.
-
-	// Packet recordings produced by the companion server plugin default to independently-compressed
-	// Zstandard blocks. Include the JNI decoder so replay works from the distributed mod jar without
-	// requiring users to install another Fabric mod.
-	implementation "com.github.luben:zstd-jni:1.5.7-6"
-	include "com.github.luben:zstd-jni:1.5.7-6"
-
-	// Settings UI. Both are standalone mods the user installs separately, so `modImplementation`
-	// (not `include`) — bundling them via jar-in-jar would be wrong.
-	modImplementation "dev.isxander:yet-another-config-lib:${project.yacl_version}"
-	modImplementation "com.terraformersmc:modmenu:${project.modmenu_version}"
-
-	// JUnit 5 for the wire-protocol golden round-trip test (BinaryCodecGoldenTest). Test-only.
-	testImplementation platform("org.junit:junit-bom:5.10.2")
-	testImplementation "org.junit.jupiter:junit-jupiter"
-	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+tasks.register('buildRecorder') {
+	group = 'build'
+	description = 'Build only the dataset recorder mod (and the core classes it depends on).'
+	dependsOn ':ocl-recorder:build'
 }
 
-processResources {
-	def version = project.version
-	inputs.property "version", version
-
-	filesMatching("fabric.mod.json") {
-		expand "version": version
-	}
+tasks.register('collectModJars', Sync) {
+	group = 'build'
+	description = 'Collect both remapped distributable mod jars under build/libs.'
+	dependsOn ':ocl-core:remapJar', ':ocl-recorder:remapJar'
+	from(project(':ocl-core').tasks.named('remapJar').flatMap { it.archiveFile })
+	from(project(':ocl-recorder').tasks.named('remapJar').flatMap { it.archiveFile })
+	into layout.buildDirectory.dir('libs')
 }
 
-tasks.withType(JavaCompile).configureEach {
-	it.options.release = 21
+tasks.named('clean') {
+	dependsOn ':ocl-core:clean', ':ocl-recorder:clean'
 }
 
-// Run the JUnit 5 golden test as part of `build` (Loom wires `test` into `build`, so CI's
-// `./gradlew build` runs it automatically). The test reads protocol/golden from the project root.
-test {
-	useJUnitPlatform()
+tasks.named('build') {
+	dependsOn 'buildCore', 'buildRecorder', 'collectModJars'
 }
 
-// Regenerate protocol/golden/*.bin from cases.json using BinaryCodec as the reference encoder.
-// Run `./gradlew genGolden` after changing a fixture, then commit the updated .bin files.
-tasks.register('genGolden', JavaExec) {
+tasks.register('run') {
+	group = 'fabric'
+	description = 'Run a Minecraft client with both OCL core and the recorder loaded.'
+	dependsOn ':ocl-recorder:runClient'
+}
+
+tasks.register('runCore') {
+	group = 'fabric'
+	description = 'Run a Minecraft client with only OCL core loaded.'
+	dependsOn ':ocl-core:runClient'
+}
+
+tasks.register('genGolden') {
 	group = 'verification'
-	description = 'Regenerate protocol/golden/*.bin from cases.json (reference encoder).'
-	classpath = sourceSets.test.runtimeClasspath
-	mainClass = 'mod.kelvinlby.link.GenGolden'
-	args = [
-			file('protocol/golden/cases.json').absolutePath,
-			file('protocol/golden').absolutePath,
-	]
-}
-
-java {
-	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-	// if it is present.
-	// If you remove this line, sources will not be generated.
-	withSourcesJar()
-
-	sourceCompatibility = JavaVersion.VERSION_21
-	targetCompatibility = JavaVersion.VERSION_21
-}
-
-jar {
-	def projectName = project.name
-	inputs.property "projectName", projectName
-
-	from("LICENSE") {
-		rename { "${it}_$projectName"}
-	}
-}
-
-// configure the maven publication
-publishing {
-	publications {
-		create("mavenJava", MavenPublication) {
-			from components.java
-		}
-	}
-
-	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
-	repositories {
-		// Add repositories to publish to here.
-		// Notice: This block does NOT have the same function as the block in the top level.
-		// The repositories here will be used for publishing your artifact, not for
-		// retrieving dependencies.
-	}
+	description = 'Regenerate shared protocol golden vectors.'
+	dependsOn ':ocl-core:genGolden'
 }

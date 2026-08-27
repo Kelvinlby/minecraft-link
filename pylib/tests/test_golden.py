@@ -62,8 +62,8 @@ class OclvDecodeTest(unittest.TestCase):
                 self.assertEqual(f.h, case["h"])
                 self.assertEqual(f.near, _f32(case["near"]))
                 self.assertEqual(f.far, _f32(case["far"]))
-                self.assertEqual(list(f.rgb), [_f32(x) for x in case["rgb"]])
-                self.assertEqual(list(f.depth), [_f32(x) for x in case["depth"]])
+                self.assertEqual(list(f.rgb), [_f32(round(max(0, min(1, x)) * 255) / 255) for x in case["rgb"]])
+                self.assertEqual(list(f.depth), [_f32(round(max(0, min(1, x)) * 65535) / 65535) for x in case["depth"]])
 
 
 class OcliEncodeTest(unittest.TestCase):

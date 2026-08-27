@@ -17,12 +17,12 @@ jobs:
       - name: setup jdk
         uses: actions/setup-java@v5
         with:
-          java-version: '25'
+          java-version: '21'
           distribution: 'microsoft'
       - name: setup python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.9'
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
       - name: verify generated protocol constants are in sync
@@ -31,7 +31,7 @@ jobs:
         run: |
           python protocol/gen_constants.py
           git diff --exit-code -- \
-            src/main/java/mod/kelvinlby/link/generated/Protocol.java \
+            ocl-core/src/main/java/mod/kelvinlby/link/generated/Protocol.java \
             pylib/src/ocl/_protocol.py
       - name: build
         # Runs the JUnit golden test too (Loom wires `test` into `build`).

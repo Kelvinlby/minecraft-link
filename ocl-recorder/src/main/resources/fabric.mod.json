@@ -1,0 +1,29 @@
+{
+	"schemaVersion": 1,
+	"id": "open-crafter-recorder",
+	"version": "${version}",
+	"name": "Open Crafter Dataset Recorder",
+	"description": "Developer dataset capture and packet-replay tooling for Open Crafter Link.",
+	"authors": ["Kelvin_LBY"],
+	"contact": {
+		"homepage": "https://github.com/Kelvinlby/minecraft-link"
+	},
+	"license": "GPL-3.0",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["mod.kelvinlby.recorder.OpenCrafterRecorderClient"],
+		"modmenu": ["mod.kelvinlby.recorder.config.RecorderModMenuIntegration"]
+	},
+	"mixins": ["open-crafter-recorder.mixins.json"],
+	"depends": {
+		"fabricloader": ">=0.19.0",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*",
+		"open-crafter-link": "${version}",
+		"yet_another_config_lib_v3": "*"
+	},
+	"suggests": {
+		"modmenu": "*"
+	}
+}

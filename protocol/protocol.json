@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "vis_version": 1,
+  "vis_version": 2,
   "movement_bits": {
     "FRONT": 0,
     "BACK": 1,

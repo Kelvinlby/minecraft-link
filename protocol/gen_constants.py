@@ -6,7 +6,7 @@ bitmask positions, slot-group opcodes, and inventory-op opcodes that the OCLO/OC
 format shares between the mod (Java) and the controller (Python). This script turns that one
 spec into two generated, checked-in files:
 
-  * src/main/java/mod/kelvinlby/link/generated/Protocol.java  (public static final ints)
+  * ocl-core/src/main/java/mod/kelvinlby/link/generated/Protocol.java  (public static final ints)
   * pylib/src/ocl/_protocol.py                                (module-level ints)
 
 Both are regenerated and committed; CI runs this script and `git diff --exit-code` so a spec
@@ -23,7 +23,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPEC_PATH = REPO_ROOT / "protocol" / "protocol.json"
-JAVA_OUT = REPO_ROOT / "src" / "main" / "java" / "mod" / "kelvinlby" / "link" / "generated" / "Protocol.java"
+JAVA_OUT = REPO_ROOT / "ocl-core" / "src" / "main" / "java" / "mod" / "kelvinlby" / "link" / "generated" / "Protocol.java"
 PYTHON_OUT = REPO_ROOT / "pylib" / "src" / "ocl" / "_protocol.py"
 
 GENERATED_NOTE = "GENERATED FROM protocol/protocol.json BY protocol/gen_constants.py — DO NOT EDIT BY HAND."

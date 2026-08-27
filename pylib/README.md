@@ -162,8 +162,8 @@ subcommand to point at non-default endpoints.
 
 | Stream | Magic | Mod socket            | Controller socket      |
 |--------|-------|-----------------------|------------------------|
-| Telemetry | `OCLO` | server bind `*:5557` | client connect `host:5557` |
-| Vision    | `OCLV` | server bind `*:5559` | client connect `host:5559` |
+| Telemetry | `OCLO` | server bind `<tcpBind>:5557` | client connect `host:5557` |
+| Vision    | `OCLV` | server bind `<tcpBind>:5559` | client connect `host:5559` |
 | Instructions | `OCLI` | client connect `host:5558` | server bind `*:5558` |
 
 Every stream conflates to the newest message (queue depth 1, newest wins).

@@ -2,11 +2,15 @@
 
 [![build](https://img.shields.io/github/actions/workflow/status/Kelvinlby/minecraft-link/build.yml?branch=main&style=for-the-badge&logo=github&label=Build)](https://github.com/Kelvinlby/minecraft-link/actions/workflows/build.yml)
 
-A client-side **Fabric** mod that bridges a running Minecraft client to an external
+A pair of client-side **Fabric** mods. **Open Crafter Link** bridges a running Minecraft client to an external
 **Open Crafter** controller over a small custom binary protocol on raw sockets. It streams the
 player's state and a real RGBD view of the world *out*, and applies movement / look / action
-instructions *in* — turning a vanilla client into a controllable embodied environment. It can
-also **record** aligned RGBD-frame + player-action datasets from human play or replayed packet sessions.
+instructions *in* — turning a vanilla client into a controllable embodied environment. The optional
+**Open Crafter Dataset Recorder** mod records aligned RGBD-frame + player-action datasets from human
+play or replayed packet sessions and depends on the core mod.
+
+- `open-crafter-link-<version>.jar`: core link and virtual-camera features for ordinary users
+- `open-crafter-recorder-<version>.jar`: optional developer recorder and packet-replay tooling
 
 - **Minecraft:** 1.21.11 · **Loader:** Fabric · **Side:** client only
 - **Transport:** Unix domain sockets (`AF_UNIX`) by default — a faster local-only link — or
@@ -23,8 +27,8 @@ game-critical thread blocks on I/O.
 
 | Stream | Magic | Direction | Mod socket | Cadence |
 |--------|-------|-----------|------------|---------|
-| Telemetry    | `OCLO` | MC → controller | server bind `*:5557` | ~20 Hz (client tick) |
-| Vision (RGBD)| `OCLV` | MC → controller | server bind `*:5559` | up to `visionMaxHz` (render thread) |
+| Telemetry    | `OCLO` | MC → controller | server bind `<tcpBind>:5557` | ~20 Hz (client tick) |
+| Vision (RGBD)| `OCLV` | MC → controller | server bind `<tcpBind>:5559` | up to `visionMaxHz` (render thread) |
 | Instructions | `OCLI` | controller → MC | client connect `<host>:5558` | applied per tick |
 
 The mod **binds** its two outbound servers (stable, long-lived) and **connects** its inbound
@@ -68,8 +72,9 @@ the 3D world and first-person hand, but **before the HUD** — so frames are the
 with no overlay. The GPU→CPU readback is asynchronous through a triple-buffered ring;
 frames are downsampled straight out of mapped GPU memory (nearest-neighbour, or box-filter
 for RGB when enabled) and the heavy float conversion + depth linearization runs off the
-render thread. Depth is linear eye-space distance normalized by the far plane (0..1), with
-`near`/`far` (blocks) carried in each frame header.
+render thread. RGB is packed as 8-bit channels and depth as normalized unsigned 16-bit values,
+reducing the wire payload without changing the decoded `0..1` API. Depth is linear eye-space
+distance normalized by the far plane, with `near`/`far` (blocks) carried in each frame header.
 
 ## Configuration
 
@@ -82,6 +87,7 @@ the vision resolution updates without a client restart.
 |---------|---------|--------|
 | **Transport** | `UDS` | Link transport — `UDS` (local `AF_UNIX`) or `TCP` (plain TCP, networked) |
 | **TCP URL** | `tcp://127.0.0.1` | TCP mode: controller host (host only; ports are canonical) for the inbound instruction stream |
+| **TCP bind address** | `127.0.0.1` | Local address for telemetry/vision servers; use `0.0.0.0` only for a trusted remote controller |
 | **UDS directory** | *(blank)* | UDS mode: directory for the `.sock` files; blank = auto-resolve |
 | **Camera width**  | `768` | Width of published vision frames (px) |
 | **Camera height** | `432` | Height of published vision frames (px) |
@@ -125,9 +131,11 @@ sandboxed launcher (e.g. Flatpak Prism Launcher), grant device access as well:
 flatpak override --user --device=all org.prismlauncher.PrismLauncher
 ```
 
-### Recording (dataset capture)
+### Recording (optional dataset-recorder mod)
 
-The **Recording** tab arms a dataset recorder. With **Auto replay** off, every world you enter
+Install both jars to enable this section. Recorder settings live separately in
+`config/open-crafter-recorder.json`; an existing combined config is migrated on first launch.
+The recorder's Mod Menu screen arms dataset capture. With **Auto replay** off, every world you enter
 (single- or multiplayer) is captured to its own session under
 `<gameDir>/open-crafter-link/recording/<timestamp>/` and finalized (async, with a save-progress toast)
 when you leave the world. Each session holds aligned RGBD frames + player actions sampled at
@@ -175,7 +183,7 @@ found.
 | **Codec** | `H264` | Output video codec (`H264` or `H265`) |
 | **Quality** | `18` | CRF/CQ (0–51, lower = better/larger) |
 | **Keyframe interval** | `2` s | Seconds between keyframes |
-| **FFmpeg path** | *(blank)* | Explicit ffmpeg binary; blank = search `PATH` |
+| **FFmpeg path** | *(blank)* | Explicit ffmpeg binary for dataset video; blank = search `PATH` |
 
 ### Launch-property overrides
 
@@ -188,16 +196,22 @@ Set via JVM args (`-Docl.<name>=<value>`); when present, these win over the in-g
 | `ocl.visionBoxFilter` | `false` | Box-average RGB on downsample instead of nearest-neighbour |
 | `ocl.tcpHost` | from settings | TCP mode: pin the controller host the mod connects to for instructions |
 | `ocl.udsDir` | from settings | Pin the directory holding the UDS `.sock` files |
-| `ocl.ffmpegPath` | from settings | Pin the ffmpeg binary used for `rgb.mp4` recording |
+| `ocl.ffmpegPath` | from settings | Pin the ffmpeg binary used by core virtual cameras |
 
 ## Building
 
-A standard Fabric/Loom project:
+A single Gradle wrapper manages both Fabric/Loom subprojects:
 
 ```bash
-./gradlew build      # jar lands in build/libs/
-./gradlew runClient  # launch a dev client with the mod loaded
+./gradlew build          # build both mods; place both distributable jars in build/libs/
+./gradlew buildCore      # build only the core mod
+./gradlew buildRecorder  # build the recorder (and required core compile inputs)
+./gradlew run            # launch a dev client with both mods
+./gradlew runCore        # launch a dev client with only the core mod
 ```
+
+Both launch tasks use the same root `run/` game directory, so profiles, saves, options, and test
+configuration are shared between core-only and combined runs.
 
 CI builds every push (see the badge above).
 

@@ -1,0 +1,59 @@
+plugins {
+	id 'net.fabricmc.fabric-loom-remap'
+	id 'maven-publish'
+}
+
+base { archivesName = 'open-crafter-recorder' }
+
+loom {
+	// Compile recorder sources against the fields widened at runtime by the required core mod.
+	accessWidenerPath = project(':ocl-core').file('src/main/resources/open-crafter-link.accesswidener')
+	runs {
+		client {
+			runDir '../run'
+		}
+	}
+}
+
+repositories {
+	mavenCentral()
+	maven { name = 'Xander'; url = 'https://maven.isxander.dev/releases' }
+	maven { name = 'TerraformersMC'; url = 'https://maven.terraformersmc.com/releases' }
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	modImplementation "dev.isxander:yet-another-config-lib:${project.yacl_version}"
+	modImplementation "com.terraformersmc:modmenu:${project.modmenu_version}"
+	implementation project(path: ':ocl-core', configuration: 'namedElements')
+	implementation 'com.github.luben:zstd-jni:1.5.7-6'
+	include 'com.github.luben:zstd-jni:1.5.7-6'
+	testImplementation platform('org.junit:junit-bom:5.10.2')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+processResources {
+	inputs.property 'version', project.version
+	filesMatching('fabric.mod.json') { expand version: project.version }
+}
+
+tasks.withType(JavaCompile).configureEach { options.release = 21 }
+test {
+	useJUnitPlatform()
+	workingDir = rootProject.projectDir
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar { from(rootProject.file('LICENSE')) { rename { "${it}_${project.name}" } } }
+
+publishing {
+	publications { create('mavenJava', MavenPublication) { from components.java } }
+}

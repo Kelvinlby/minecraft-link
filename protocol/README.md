@@ -3,7 +3,7 @@
 The Open Crafter Link wire format (the `OCLO` telemetry, `OCLI` instruction, and `OCLV`
 vision frames) is spoken by two independent codecs:
 
-- **Java (mod):** `src/main/java/mod/kelvinlby/link/BinaryCodec.java`
+- **Java (core mod):** `ocl-core/src/main/java/mod/kelvinlby/link/BinaryCodec.java`
 - **Python (controller):** `pylib/src/ocl/__init__.py`
 
 To stop the two from silently drifting apart, the shared *constants* have one source of
@@ -20,7 +20,7 @@ truth here, and the *byte layout* is pinned by a cross-language golden round-tri
 
 Generated, **do not hand-edit** (regenerate instead):
 
-- `src/main/java/mod/kelvinlby/link/generated/Protocol.java`
+- `ocl-core/src/main/java/mod/kelvinlby/link/generated/Protocol.java`
 - `pylib/src/ocl/_protocol.py`
 
 The codecs, `SlotGroup`, and `InventoryAction.Op` all reference the generated constants, so a

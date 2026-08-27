@@ -4,7 +4,7 @@ GENERATED FROM protocol/protocol.json BY protocol/gen_constants.py — DO NOT ED
 """
 
 VERSION = 3
-VIS_VERSION = 1
+VIS_VERSION = 2
 
 # Movement bitmask (1 << position).
 M_FRONT = 1 << 0

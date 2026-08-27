@@ -6,6 +6,8 @@ prompt/
 
 .gradle/
 build/
+ocl-core/build/
+ocl-recorder/build/
 out/
 classes/
 
@@ -35,6 +37,7 @@ bin/
 # fabric
 
 run/
+logs/
 
 # java
 

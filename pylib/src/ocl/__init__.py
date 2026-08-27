@@ -51,10 +51,12 @@ Flatpak app runtime dir inside a sandbox); override with ``--uds-dir``.
 from __future__ import annotations
 
 import os
+import sys
 import selectors
 import socket
 import struct
 import time
+from array import array
 from dataclasses import dataclass
 from typing import Iterator, Optional, Sequence
 
@@ -392,7 +394,7 @@ def _decode_inventory(buf: bytes, off: int) -> "Optional[Inventory]":
 
 
 def decode_vision(buf: bytes) -> VisionFrame:
-    # magic[4] ver[1] w[i] h[i] near[f] far[f] rgb[w*h*3 f] depth[w*h f]
+    # v2: magic[4] ver[1] w[i] h[i] near[f] far[f] rgb[w*h*3 u8] depth[w*h u16]
     head = 5 + 4 + 4 + 4 + 4
     if len(buf) < head:
         raise ValueError(f"OCLV too short: {len(buf)} bytes")
@@ -403,11 +405,17 @@ def decode_vision(buf: bytes) -> VisionFrame:
     w, h, near, far = struct.unpack_from("<iiff", buf, 5)
     n_rgb = w * h * 3
     n_depth = w * h
-    want = head + (n_rgb + n_depth) * 4
+    want = head + n_rgb + n_depth * 2
     if len(buf) != want:
         raise ValueError(f"OCLV length mismatch: got {len(buf)}, expected {want} (w={w} h={h})")
-    rgb = struct.unpack_from(f"<{n_rgb}f", buf, head)
-    depth = struct.unpack_from(f"<{n_depth}f", buf, head + n_rgb * 4)
+    # array('f') retains compact C floats rather than expanding a default frame into ~1.3 million
+    # Python float objects. Quantization mirrors the mod's RGB8/depth16 wire representation.
+    rgb = array("f", (value / 255.0 for value in memoryview(buf)[head:head + n_rgb]))
+    depth_u16 = array("H")
+    depth_u16.frombytes(buf[head + n_rgb:])
+    if sys.byteorder != "little":
+        depth_u16.byteswap()
+    depth = array("f", (value / 65535.0 for value in depth_u16))
     return VisionFrame(w, h, near, far, rgb, depth)
 
 

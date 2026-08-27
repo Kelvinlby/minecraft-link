@@ -1,0 +1,64 @@
+plugins {
+	id 'net.fabricmc.fabric-loom-remap'
+	id 'maven-publish'
+}
+
+base { archivesName = 'open-crafter-link' }
+
+loom {
+	accessWidenerPath = file('src/main/resources/open-crafter-link.accesswidener')
+	runs {
+		client {
+			runDir '../run'
+		}
+	}
+}
+
+repositories {
+	mavenCentral()
+	maven { name = 'Xander'; url = 'https://maven.isxander.dev/releases' }
+	maven { name = 'TerraformersMC'; url = 'https://maven.terraformersmc.com/releases' }
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	modImplementation "dev.isxander:yet-another-config-lib:${project.yacl_version}"
+	modImplementation "com.terraformersmc:modmenu:${project.modmenu_version}"
+	testImplementation platform('org.junit:junit-bom:5.10.2')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+processResources {
+	inputs.property 'version', project.version
+	filesMatching('fabric.mod.json') { expand version: project.version }
+}
+
+tasks.withType(JavaCompile).configureEach { options.release = 21 }
+test {
+	useJUnitPlatform()
+	workingDir = rootProject.projectDir
+}
+
+tasks.register('genGolden', JavaExec) {
+	group = 'verification'
+	description = 'Regenerate protocol/golden/*.bin from cases.json.'
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'mod.kelvinlby.link.GenGolden'
+	args = [rootProject.file('protocol/golden/cases.json').absolutePath,
+			rootProject.file('protocol/golden').absolutePath]
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar { from(rootProject.file('LICENSE')) { rename { "${it}_${project.name}" } } }
+
+publishing {
+	publications { create('mavenJava', MavenPublication) { from components.java } }
+}
