@@ -234,7 +234,6 @@ final class PacketReplaySession implements AutoCloseable {
 				long target = captureOriginMicros + datasetTime;
 				advanceTo(target, mc);
 				actions.refreshObservation(mc);
-				updateProgress(target);
 				// Latch the observation here, on the render thread, with the world exactly as this frame
 				// will draw it — later windows will have moved the world on before the sampler runs.
 				openWindow = new SampleWindow(nextSeq, datasetTime, target,
@@ -281,14 +280,15 @@ final class PacketReplaySession implements AutoCloseable {
 		if (callback != null) callback.run();
 	}
 
-	private void updateProgress(long replayMicros) {
+	private void updateProgress(long processedMicros, long processedSamples) {
 		if (progressToast == null) return;
-		if (estimatedDurationMicros > 0L) {
-			progressToast.setProgress((float)Math.min(replayMicros, estimatedDurationMicros)
-					/ (float)estimatedDurationMicros);
-		} else {
-			progressToast.setProgress(0.0F); // unindexed standalone recordings have no known denominator
-		}
+		long remainingMicros = estimatedDurationMicros < 0L
+				? -1L : Math.max(1L, estimatedDurationMicros - captureOriginMicros);
+		float progress = remainingMicros > 0L
+				? (float)Math.min(processedMicros, remainingMicros) / (float)remainingMicros
+				: 0.0F; // unindexed standalone recordings have no known denominator
+		double elapsedSeconds = Math.max(1L, System.nanoTime() - captureWallStartNs) / 1_000_000_000.0;
+		progressToast.setProgress(progress, processedSamples / elapsedSeconds);
 	}
 
 	private void advanceTo(long targetMicros, MinecraftClient mc) {
@@ -382,8 +382,10 @@ final class PacketReplaySession implements AutoCloseable {
 
 	/** Called only after the corresponding fresh RGBD frame is safely queued to the dataset writer. */
 	public synchronized void frameConsumed(long seq) {
-		if (issued.remove(seq) == null) return;
+		SampleWindow consumed = issued.remove(seq);
+		if (consumed == null) return;
 		inFlight--;
+		updateProgress(consumed.timeMicros(), seq + 1L);
 		// Sequence numbers are consumed in order, so the final window being consumed means the pipeline
 		// is empty — every earlier sample is already on the writer's queue.
 		if (seq == finalSeq) naturalComplete = true;

@@ -20,7 +20,7 @@ jobs:
           java-version: '21'
           distribution: 'microsoft'
       - name: setup python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.9'
       - name: make gradle wrapper executable
@@ -45,9 +45,17 @@ jobs:
         run: |
           pip install ./pylib
           python -m unittest discover -s pylib/tests
-      - name: capture build artifacts
+      - name: capture core build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event.repository.name }}
-          path: build/libs/
+          name: ${{ github.event.repository.name }}-core
+          path: build/libs/open-crafter-link-*.jar
+          if-no-files-found: error
+          retention-days: 7
+      - name: capture recorder build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-recorder
+          path: build/libs/open-crafter-recorder-*.jar
+          if-no-files-found: error
           retention-days: 7
