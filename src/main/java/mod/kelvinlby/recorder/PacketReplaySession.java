@@ -1,6 +1,8 @@
 package mod.kelvinlby.recorder;
 
 import mod.kelvinlby.OpenCrafterLink;
+import mod.kelvinlby.link.EagerCaptureGate;
+import mod.kelvinlby.link.InventoryState;
 import mod.kelvinlby.mixin.RenderTickCounterDynamicAccessor;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.MinecraftClient;
@@ -19,10 +21,50 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
+import java.util.Map;
 
-/** One packet input being replayed into an already-live client world. */
+/**
+ * One packet input being replayed into an already-live client world.
+ *
+ * <h2>Eager pipelining</h2>
+ * Eager mode drives the render loop from a virtual clock: each <em>sample window</em> fixes a dataset
+ * timestamp, applies every packet up to it, and is rendered exactly once. A window used to stay open
+ * until the sampler thread had fully consumed its frame — through the GPU fence, the read-back drain,
+ * the float conversion and the writer queue — which meant the render thread re-rendered the identical
+ * scene for two or more frames per emitted sample, burning GPU time that produced nothing.
+ *
+ * <p>Now a window is retired as soon as its capture has been <em>issued</em> ({@link #captureIssued}):
+ * the GPU copies are already in the command stream and can only observe that window's contents, so the
+ * next window may open on the very next frame while the pixels are still travelling. Up to
+ * {@link #MAX_IN_FLIGHT} windows are outstanding at once, matched to their frames by sequence number
+ * rather than by "there is only ever one". Backpressure is unchanged in spirit — a slow writer simply
+ * stops windows from opening — it just now regulates a pipeline instead of a lockstep.
+ *
+ * <p>Because the world keeps advancing while older frames are still in flight, each window's action set
+ * and inventory observation are latched <b>on the render thread at open time</b>, when they belong to
+ * the world state that frame will show, rather than being read later from the sampler thread.
+ */
 final class PacketReplaySession implements AutoCloseable {
-	public record SampleWindow(long seq, long timeMicros, long replayMicros) {}
+	/**
+	 * One virtual sample: its dataset timestamp and the observation latched with it. {@code action} and
+	 * {@code inventory} are captured on the render thread when the window opens (see the class notes).
+	 */
+	public record SampleWindow(long seq, long timeMicros, long replayMicros,
+			ActionSet action, InventoryState inventory) {}
+
+	/**
+	 * How many issued-but-unconsumed sample windows replay allows. The read-back ring is three deep, so
+	 * one more than that keeps a window ready to claim the moment a slot frees without ever outrunning
+	 * the bounded hand-off queues behind it ({@code VisionTap.EAGER_CAPACITY}).
+	 */
+	private static final int MAX_IN_FLIGHT = 8;
+
+	/**
+	 * Longest the render thread waits for the pipeline to drain before giving up and drawing a frame
+	 * that produces no sample. It is woken the instant a sample is retired, so this is only a ceiling.
+	 */
+	private static final long BACKPRESSURE_WAIT_MS = 2L;
 
 	private final PacketRecordingReader reader;
 	private final PacketActionInterpreter actions = new PacketActionInterpreter();
@@ -42,9 +84,14 @@ final class PacketReplaySession implements AutoCloseable {
 	private boolean eof;
 	private boolean failed;
 	private boolean closed;
-	private boolean awaitingFrame;
+	/** The window awaiting its capture, or null when none is open (nothing to render for). */
+	private SampleWindow openWindow;
 	private boolean captureClaimed;
-	private boolean finalWindow;
+	/** Windows whose capture is issued but whose frame has not reached the dataset yet, by seq. */
+	private final Map<Long, SampleWindow> issued = new HashMap<>();
+	private int inFlight;
+	/** Seq of the last window of the recording once it has been opened; -1 until then. */
+	private long finalSeq = -1L;
 	private boolean completionPending;
 	private boolean naturalComplete;
 	private boolean sawGameJoin;
@@ -53,7 +100,9 @@ final class PacketReplaySession implements AutoCloseable {
 	private long captureOriginMicros;
 	private volatile long captureWallStartNs;
 	private long nextSeq;
-	private SampleWindow activeWindow;
+	/** Throughput counters, logged on close: render passes vs. samples they actually produced. */
+	private long renderCalls;
+	private long windowsOpened;
 	/** Wall-clock anchor plus replay elapsed time supplied to vanilla's render tick counter. */
 	private boolean virtualClockStarted;
 	private long virtualClockBaseMillis;
@@ -154,33 +203,57 @@ final class PacketReplaySession implements AutoCloseable {
 
 	/**
 	 * Render-thread hook immediately before vanilla calculates its client ticks. In eager mode this
-	 * opens exactly one output window, applies its packets, and advances Minecraft's clock by the
-	 * configured sample period. Repeated renders while the encoder owns that window see the same
-	 * timestamp, so they cannot accidentally tick animations twice.
+	 * opens the next output window, applies its packets, latches the observation that belongs to it, and
+	 * advances Minecraft's clock by the configured sample period.
+	 *
+	 * <p>When the pipeline is saturated — {@link #MAX_IN_FLIGHT} captures already travelling, typically
+	 * because a downstream stage is slower than rendering — no window opens and the returned timestamp is
+	 * unchanged, so the frame about to be drawn cannot tick animations twice. Rather than spend a whole
+	 * GPU pass on a frame that produces nothing, the thread waits briefly for a sample to retire; the
+	 * sampler notifies as soon as one does, so the wait is normally far shorter than its ceiling.
 	 */
 	public long prepareRenderTime(long wallTimeMillis, MinecraftClient mc) {
+		long timeMillis;
 		synchronized (this) {
 			if (closed || !eager || !captureReady) return wallTimeMillis;
+			renderCalls++;
 			if (!virtualClockStarted) {
 				virtualClockStarted = true;
 				virtualClockBaseMillis = wallTimeMillis;
 				virtualClockElapsedMicros = 0L;
 			}
-			if (!completionPending && !awaitingFrame) {
+			if (openWindow == null && inFlight >= MAX_IN_FLIGHT && !completionPending && !failed) {
+				try {
+					wait(BACKPRESSURE_WAIT_MS); // frameConsumed notifies; this releases the lock meanwhile
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+				}
+			}
+			if (canOpenWindow()) {
 				long datasetTime = (nextSeq + 1L) * periodMicros;
 				long target = captureOriginMicros + datasetTime;
 				advanceTo(target, mc);
 				actions.refreshObservation(mc);
 				updateProgress(target);
-				activeWindow = new SampleWindow(nextSeq, datasetTime, target);
-				awaitingFrame = true;
+				// Latch the observation here, on the render thread, with the world exactly as this frame
+				// will draw it — later windows will have moved the world on before the sampler runs.
+				openWindow = new SampleWindow(nextSeq, datasetTime, target,
+						actions.sampleAt(target), actions.currentInventory());
 				captureClaimed = false;
-				finalWindow = eof && target >= lastRecordMicros;
+				if (eof && target >= lastRecordMicros) finalSeq = nextSeq;
+				nextSeq++;
+				windowsOpened++;
 				virtualClockElapsedMicros = datasetTime;
-				notifyAll();
 			}
-			return virtualClockBaseMillis + virtualClockElapsedMicros / 1_000L;
+			timeMillis = virtualClockBaseMillis + virtualClockElapsedMicros / 1_000L;
 		}
+		return timeMillis;
+	}
+
+	/** Whether a fresh sample window may be opened. Caller holds the lock. */
+	private boolean canOpenWindow() {
+		return openWindow == null && !completionPending && !failed
+				&& finalSeq < 0L && inFlight < MAX_IN_FLIGHT;
 	}
 
 	/** Render-thread world hook. Eager packet advancement already happened before client ticking. */
@@ -277,31 +350,59 @@ final class PacketReplaySession implements AutoCloseable {
 		}
 	}
 
-	/** Sampler-thread wait for the eager frame boundary opened by {@link #onRenderStart}. */
-	public synchronized SampleWindow awaitWindow(long afterSeq) throws InterruptedException {
-		while (!closed && (activeWindow == null || activeWindow.seq() <= afterSeq || !awaitingFrame)) wait(100L);
-		return closed ? null : activeWindow;
-	}
-
-	/** Permit exactly one GPU capture for each eager sample window. */
-	public synchronized boolean claimCapture() {
-		if (!eager || !awaitingFrame || captureClaimed || closed) return false;
+	/** Permit exactly one GPU capture for each eager sample window; returns that window's seq. */
+	public synchronized long claimCapture() {
+		if (!eager || closed || openWindow == null || captureClaimed) return EagerCaptureGate.NO_CAPTURE;
 		captureClaimed = true;
-		return true;
+		return openWindow.seq();
 	}
 
-	/** Return a claim when the render seam had to abandon the GPU slot before publishing a frame. */
+	/** Return a claim when the render seam had to abandon the GPU slot before issuing the copies. */
 	public synchronized void releaseCapture() {
-		if (awaitingFrame) captureClaimed = false;
+		captureClaimed = false; // the window stays open and is retried on a later frame
+	}
+
+	/**
+	 * Both read-back copies for {@code seq} are in the GL command stream. They can no longer observe
+	 * anything but this window, so the window is retired for rendering and the next one may open on the
+	 * following frame while these pixels are still in flight.
+	 */
+	public synchronized void captureIssued(long seq) {
+		if (openWindow == null || openWindow.seq() != seq) return;
+		issued.put(seq, openWindow);
+		openWindow = null;
+		captureClaimed = false;
+		inFlight++;
+	}
+
+	/** The window a committed capture belongs to, or null if it was cancelled. Sampler thread. */
+	public synchronized SampleWindow windowFor(long seq) {
+		return issued.get(seq);
 	}
 
 	/** Called only after the corresponding fresh RGBD frame is safely queued to the dataset writer. */
 	public synchronized void frameConsumed(long seq) {
-		if (!awaitingFrame || activeWindow == null || activeWindow.seq() != seq) return;
-		awaitingFrame = false;
-		nextSeq = seq + 1L;
-		if (finalWindow) naturalComplete = true;
-		if (finalWindow || failed) completionPending = true;
+		if (issued.remove(seq) == null) return;
+		inFlight--;
+		// Sequence numbers are consumed in order, so the final window being consumed means the pipeline
+		// is empty — every earlier sample is already on the writer's queue.
+		if (seq == finalSeq) naturalComplete = true;
+		if (seq == finalSeq || failed) completionPending = true;
+		notifyAll();
+	}
+
+	/**
+	 * A committed capture was thrown away before its pixels reached the CPU (the read-back ring was torn
+	 * down under it, e.g. the framebuffer was resized mid-replay). The sample is gone, so the session
+	 * cannot be archived as a faithful encode of its input — fail it loudly and let the batch halt with
+	 * the input still in the inbox rather than write a dataset with a silent hole in it.
+	 */
+	public synchronized void captureCancelled(long seq) {
+		if (issued.remove(seq) == null) return;
+		inFlight--;
+		failed = true;
+		completionPending = true;
+		OpenCrafterLink.LOGGER.error("[open-crafter-link] eager capture for sample {} was abandoned; failing the replay", seq);
 		notifyAll();
 	}
 
@@ -335,7 +436,17 @@ final class PacketReplaySession implements AutoCloseable {
 	}
 
 	@Override public void close() {
-		synchronized (this) { closed = true; notifyAll(); }
+		synchronized (this) {
+			closed = true;
+			if (eager && windowsOpened > 0) {
+				// The efficiency of the eager pipeline in one number: render passes per emitted sample.
+				// 1.0 means every rendered frame produced a sample; anything well above it means the
+				// render thread is waiting on a slower stage (usually the dataset writer).
+				OpenCrafterLink.LOGGER.info("[open-crafter-link] eager replay: {} samples from {} render passes ({} renders/sample)",
+						windowsOpened, renderCalls, String.format("%.2f", (double)renderCalls / (double)windowsOpened));
+			}
+			notifyAll();
+		}
 		playerProjector.close(MinecraftClient.getInstance());
 		ReplayOutboundGuard.setActive(false);
 		if (progressToast != null) progressToast.hide();

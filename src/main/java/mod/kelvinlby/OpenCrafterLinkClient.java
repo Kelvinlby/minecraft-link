@@ -133,8 +133,7 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		IntSupplier visionH = (LinkConfig.VISION_TARGET_H != null)
 				? LinkConfig.VISION_TARGET_H::intValue : () -> cfg.cameraHeight;
 		final VisionCapture vision = new VisionCapture(OpenCrafterLinkClient::bridge, visionW, visionH,
-				LinkConfig.VISION_MAX_HZ, LinkConfig.VISION_BOX_FILTER,
-				recorder::eagerCaptureActive, recorder::claimEagerCapture, recorder::releaseEagerCapture);
+				LinkConfig.VISION_MAX_HZ, LinkConfig.VISION_BOX_FILTER, recorder.captureGate());
 		WorldRenderEvents.START_MAIN.register(ctx -> recorder.onWorldRenderStart(MinecraftClient.getInstance()));
 		WorldRenderEvents.END_MAIN.register(ctx -> vision.onWorldRenderEnd());
 		HudElementRegistry.addFirst(Identifier.of(OpenCrafterLink.MOD_ID, "vision_capture"),

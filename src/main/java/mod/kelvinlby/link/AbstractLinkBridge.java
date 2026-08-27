@@ -9,6 +9,8 @@ import java.nio.ByteOrder;
 import java.nio.channels.Channel;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
@@ -53,6 +55,11 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 
 	/** Latest raw framebuffer readback. Render thread writes; vision worker drains. */
 	private final AtomicReference<RawFrame> visionRaw = new AtomicReference<>();
+	/**
+	 * Eager-replay readbacks, which must all be converted, in order (see {@link #enqueueVisionRaw}).
+	 * Bounded well above replay's in-flight window cap so the render thread never blocks or drops.
+	 */
+	private final BlockingQueue<RawFrame> visionRawEager = new ArrayBlockingQueue<>(16);
 	/** Latest converted vision frame. Vision worker writes; vision sender drains. */
 	private final AtomicReference<VisionFrame> visionOutbox = new AtomicReference<>();
 
@@ -71,8 +78,12 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 	private volatile Channel instructionChannel;
 	private volatile Channel visionChannel;
 
-	/** Raw, already-downsampled framebuffer bytes handed render -&gt; vision worker (RGBA8 + DEPTH32). */
-	private record RawFrame(int width, int height, float near, float far, byte[] rgba, byte[] depth) {}
+	/**
+	 * Raw, already-downsampled framebuffer bytes handed render -&gt; vision worker (RGBA8 + DEPTH32).
+	 * {@code seq} is the eager-replay sample window this frame was captured for, or
+	 * {@link EagerCaptureGate#NO_CAPTURE} for ordinary conflated capture.
+	 */
+	private record RawFrame(int width, int height, float near, float far, byte[] rgba, byte[] depth, long seq) {}
 
 	// --------------------------------------------------------------------- //
 	// Lifecycle                                                             //
@@ -150,8 +161,16 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 	}
 
 	@Override
-	public final void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth) {
-		visionRaw.set(new RawFrame(w, h, near, far, rgba, depth));
+	public final void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth, long seq) {
+		RawFrame frame = new RawFrame(w, h, near, far, rgba, depth, seq);
+		if (seq >= 0) {
+			if (!visionRawEager.offer(frame)) {
+				OpenCrafterLink.LOGGER.error("[open-crafter-link] eager readback queue overflow; dropping sample {}", seq);
+				return;
+			}
+		} else {
+			visionRaw.set(frame);
+		}
 		LockSupport.unpark(visionWorkerThread);
 	}
 
@@ -232,13 +251,17 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 	private void visionWorkerLoop() {
 		try {
 			while (running) {
-				RawFrame raw = visionRaw.getAndSet(null);
+				// Eager-replay frames first and in order; they are the ones nothing else may drop.
+				RawFrame raw = visionRawEager.poll();
+				if (raw == null) {
+					raw = visionRaw.getAndSet(null);
+				}
 				if (raw == null) {
 					LockSupport.parkNanos(2_000_000L); // ~2ms; nothing fresh to convert
 					continue;
 				}
 				VisionFrame frame = convert(raw);
-				VisionTap.publish(frame); // no-op unless a recording session is active
+				VisionTap.publish(frame, raw.seq()); // tap is a no-op unless a consumer is active
 				visionOutbox.set(frame);
 				LockSupport.unpark(visionSenderThread);
 			}

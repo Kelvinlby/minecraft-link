@@ -1,6 +1,7 @@
 package mod.kelvinlby.recorder;
 
 import mod.kelvinlby.OpenCrafterLink;
+import mod.kelvinlby.link.EagerCaptureGate;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.TitleScreen;
 
@@ -60,6 +61,8 @@ public final class Recorder {
 	private boolean disconnectQueued;
 	/** Set once the quit-when-finished shutdown has been scheduled, so it is requested exactly once. */
 	private boolean quitScheduled;
+	/** Whether this game session has taken an input out of the replay inbox; gates the quit on finish. */
+	private boolean autoBatchRan;
 
 	/** The action reader to register on a client-tick event; it observes the human's live inputs. */
 	public ActionReader actionReader() {
@@ -76,9 +79,10 @@ public final class Recorder {
 	 * a world — start or finalize a session right away so the settings toggle acts immediately.
 	 * Called at init (where no world exists yet, so it only arms) and after each settings save.
 	 *
-	 * <p>{@code quitWhenFinished} makes an auto-replay instance close itself once the inbox holds
-	 * nothing more to process, so an external batch runner can use the process exit as the completion
-	 * signal for that instance.
+	 * <p>{@code quitWhenFinished} makes an auto-replay instance close itself once it has drained the
+	 * inbox, so an external batch runner can use the process exit as the completion signal for that
+	 * instance. It only ever fires for a batch this game session actually started: an inbox that was
+	 * empty the whole time leaves the game running as usual.
 	 */
 	public synchronized void syncTo(boolean enabled, boolean autoReplay, boolean eagerEncoding,
 			boolean quitWhenFinished, int hz, FfmpegEncoder.Settings videoSettings) {
@@ -139,6 +143,7 @@ public final class Recorder {
 		SampleSource source = actionReader;
 		if (autoReplay) {
 			autoWorldActive = true;
+			autoBatchRan = true; // there was queued work, so this instance now has a batch to finish
 			try {
 				replaySession = PacketReplaySession.open(REPLAY_INBOX,
 						sampleHz, eagerPacketEncoding, mc, this::onReplayFinished);
@@ -222,7 +227,9 @@ public final class Recorder {
 					OpenCrafterLink.LOGGER.error("[open-crafter-link] cannot inspect replay inbox {}", REPLAY_INBOX, e);
 				}
 				launch = pending && !autoBatchHalted;
-				if (probed && !launch && quitWhenFinished) {
+				// Only a batch this instance actually started can finish. An inbox that was empty all
+				// along is not a completed run, so the game is left alone to be played normally.
+				if (probed && !launch && quitWhenFinished && autoBatchRan) {
 					// A halted batch is finished too: it cannot make further progress on its own, and a
 					// runner waiting on the process would otherwise wait forever. The inbox tells the two
 					// outcomes apart — an empty one means every input was encoded and archived.
@@ -247,14 +254,45 @@ public final class Recorder {
 		return running && replay != null && replay.eager();
 	}
 
-	/** Render capture calls this after it has a free GPU slot; one claim is granted per virtual sample. */
-	public synchronized boolean claimEagerCapture() {
-		return replay != null && replay.claimCapture();
+	/**
+	 * The eager-capture handshake handed to {@code VisionCapture}. Every call is forwarded to the live
+	 * replay session, or ignored once there isn't one — capture seams can still fire for a frame or two
+	 * after a session ends.
+	 */
+	public EagerCaptureGate captureGate() {
+		return captureGate;
 	}
 
-	public synchronized void releaseEagerCapture() {
-		if (replay != null) replay.releaseCapture();
-	}
+	private final EagerCaptureGate captureGate = new EagerCaptureGate() {
+		@Override public boolean active() {
+			return eagerCaptureActive();
+		}
+
+		/** Render capture calls this once it has a free GPU slot; one claim per virtual sample window. */
+		@Override public long claim() {
+			synchronized (Recorder.this) {
+				return replay == null ? NO_CAPTURE : replay.claimCapture();
+			}
+		}
+
+		@Override public void commit(long seq) {
+			synchronized (Recorder.this) {
+				if (replay != null) replay.captureIssued(seq);
+			}
+		}
+
+		@Override public void release() {
+			synchronized (Recorder.this) {
+				if (replay != null) replay.releaseCapture();
+			}
+		}
+
+		@Override public void cancel(long seq) {
+			synchronized (Recorder.this) {
+				if (replay != null) replay.captureCancelled(seq);
+			}
+		}
+	};
 
 	private synchronized void onReplayFinished() {
 		if (running && replay != null) stopAsync();

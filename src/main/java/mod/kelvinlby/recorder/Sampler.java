@@ -56,6 +56,9 @@ public final class Sampler {
 	private final AtomicLong written = new AtomicLong();
 	private final AtomicLong dropped = new AtomicLong();
 	private final AtomicLong repeated = new AtomicLong();
+	/** Time the eager sampler spent waiting on a full writer queue — i.e. how writer-bound the run was. */
+	private final AtomicLong writerBlockedNanos = new AtomicLong();
+	private long startNs;
 
 	public Sampler(int hz, ActionReader actions, DatasetWriter writer) {
 		this(hz, actions, writer, null);
@@ -77,6 +80,7 @@ public final class Sampler {
 	public void start() throws java.io.IOException {
 		writer.open();
 		running = true;
+		startNs = System.nanoTime();
 
 		writerThread = new Thread(this::writerLoop, "ocl-recorder-writer");
 		clockThread = new Thread(this::clockLoop, "ocl-recorder-clock");
@@ -131,8 +135,13 @@ public final class Sampler {
 			listener.onProgress(0, true);
 		}
 		String error = writer.close(written.get(), dropped.get(), repeated.get());
-		OpenCrafterLink.LOGGER.info("[open-crafter-link] recording stopped: {} samples ({} dropped, {} repeated)",
-				written.get(), dropped.get(), repeated.get());
+		double elapsedSec = Math.max(1e-9, (System.nanoTime() - startNs) / 1e9);
+		OpenCrafterLink.LOGGER.info(
+				"[open-crafter-link] recording stopped: {} samples ({} dropped, {} repeated) in {}s"
+						+ " = {} samples/s; sampler blocked on the writer for {}s",
+				written.get(), dropped.get(), repeated.get(), String.format("%.1f", elapsedSec),
+				String.format("%.1f", written.get() / elapsedSec),
+				String.format("%.1f", writerBlockedNanos.get() / 1e9));
 		return new SaveResult(written.get(), dropped.get(), repeated.get(), error);
 	}
 
@@ -203,41 +212,55 @@ public final class Sampler {
 	}
 
 	/**
-	 * Virtual-clock sampler. Replay opens one sample window before rendering and holds world state fixed
-	 * until a fresh frame from that render has been queued. Blocking on a full writer queue is intentional:
-	 * eager mode is lossless and simply lets encoding backpressure regulate replay throughput.
+	 * Virtual-clock sampler. Replay renders each sample window once and stamps the window's sequence
+	 * number onto the capture, so several windows can be in flight through the GPU read-back ring at
+	 * once; frames arrive here in sample order on {@link VisionTap#takeEager} and are paired back up
+	 * with their window by that number. Blocking on a full writer queue is intentional: eager mode is
+	 * lossless and simply lets encoding backpressure regulate replay throughput — the block propagates
+	 * upstream as windows that stop opening.
+	 *
+	 * <p>The action set and inventory were latched on the render thread when the window opened; reading
+	 * them here would sample a world that has already moved on to later windows.
 	 */
 	private void eagerClockLoop() {
-		VisionFrame lastRaw = VisionTap.latest();
 		long lastSeq = -1L;
 		while (running) {
-			PacketReplaySession.SampleWindow window;
+			VisionTap.SeqFrame fresh;
 			try {
-				window = replay.awaitWindow(lastSeq);
+				fresh = VisionTap.takeEager(100L);
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 				return;
 			}
-			if (!running || window == null) return;
+			if (!running) return;
+			if (fresh == null) continue; // nothing rendered yet this interval; re-check the stop flag
 
-			VisionFrame fresh;
-			do {
-				fresh = VisionTap.latest();
-				if (!running) return;
-				if (fresh == null || fresh == lastRaw) LockSupport.parkNanos(500_000L);
-			} while (fresh == null || fresh == lastRaw);
+			if (fresh.seq() <= lastSeq) {
+				// The whole path from the read-back ring to here is FIFO, so this cannot happen; if it ever
+				// does, the dataset's video timeline would be silently scrambled — refuse the frame instead.
+				OpenCrafterLink.LOGGER.error("[open-crafter-link] eager frame {} arrived after {}; dropping it",
+						fresh.seq(), lastSeq);
+				continue;
+			}
+			PacketReplaySession.SampleWindow window = replay.windowFor(fresh.seq());
+			if (window == null) {
+				// Its window was cancelled (the read-back ring went away under it); replay has already
+				// failed the session, so drop the orphan frame rather than mis-pairing it.
+				OpenCrafterLink.LOGGER.warn("[open-crafter-link] no sample window for eager frame {}", fresh.seq());
+				continue;
+			}
 
-			PackedFrame frame = PackedFrame.of(fresh);
-			ActionSet action = actions.sampleAt(window.replayMicros());
-			Sample sample = new Sample(window.seq(), window.timeMicros() * 1_000L, frame, action,
-					actions.currentInventory(), false);
+			PackedFrame frame = PackedFrame.of(fresh.frame());
+			Sample sample = new Sample(window.seq(), window.timeMicros() * 1_000L, frame, window.action(),
+					window.inventory(), false);
+			long blockedFrom = System.nanoTime();
 			boolean enqueued = false;
 			while (running && !enqueued) {
 				try { enqueued = queue.offer(sample, 100L, TimeUnit.MILLISECONDS); }
 				catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
 			}
 			if (!enqueued) return;
-			lastRaw = fresh;
+			writerBlockedNanos.addAndGet(System.nanoTime() - blockedFrom);
 			lastSeq = window.seq();
 			replay.frameConsumed(window.seq());
 		}

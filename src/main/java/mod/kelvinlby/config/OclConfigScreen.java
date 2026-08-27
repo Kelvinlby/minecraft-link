@@ -246,10 +246,11 @@ public final class OclConfigScreen {
 		Option<Boolean> quitWhenFinished = Option.<Boolean>createBuilder()
 				.name(Text.literal("Quit game when finished"))
 				.description(OptionDescription.of(Text.literal(
-						"Auto replay only. Close the game once the replay inbox has nothing left to process, so "
+						"Auto replay only. Close the game once the replays it started have all been processed, so "
 								+ "a batch runner can treat the process exit as \"this instance is done\" and start the "
-								+ "next one. The game also exits if a failed input halts the batch — an inbox that is "
-								+ "not empty afterwards is what tells the two apart.")))
+								+ "next one. Nothing to replay means nothing to finish: with an empty inbox the game "
+								+ "just keeps running. It does exit if a failed input halts the batch — an inbox that "
+								+ "is not empty afterwards is what tells the two apart.")))
 				.binding(defaults.quitWhenReplayFinished,
 						() -> cfg.quitWhenReplayFinished, v -> cfg.quitWhenReplayFinished = v)
 				.controller(TickBoxControllerBuilder::create)

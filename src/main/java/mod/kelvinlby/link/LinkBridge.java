@@ -37,12 +37,17 @@ public interface LinkBridge {
 	InventoryAction takeAction();
 
 	/**
-	 * Render thread: hand off raw, already-downsampled framebuffer bytes. O(1), non-blocking,
-	 * conflating (newest wins). The worker does the float conversion + depth linearization off the
-	 * render thread.
+	 * Render thread: hand off raw, already-downsampled framebuffer bytes. O(1), non-blocking. The
+	 * worker does the float conversion + depth linearization off the render thread.
+	 *
+	 * <p>Ordinary capture is conflating (newest wins): a live controller wants the freshest frame and
+	 * nothing else. A frame carrying an eager-replay sample sequence number
+	 * ({@code seq >= 0}) instead travels a bounded FIFO lane, because a dataset must receive every
+	 * captured window in order — see {@link mod.kelvinlby.recorder.VisionTap}.
 	 *
 	 * @param rgba interleaved RGBA8, {@code w*h*4} bytes
 	 * @param depth DEPTH32 native-float bytes, {@code w*h*4} bytes
+	 * @param seq eager-replay sample sequence number, or {@link EagerCaptureGate#NO_CAPTURE}
 	 */
-	void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth);
+	void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth, long seq);
 }

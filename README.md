@@ -151,11 +151,13 @@ backpressure. Thus it changes only processing speed: output timestamps and MP4 F
 configured **Sample rate**. A top-right progress toast tracks indexed session progress; it is drawn
 after the recorder's pre-HUD RGB capture seam and therefore never appears in RGB or depth output.
 
-`Quit when finished` closes the game as soon as the batch has nothing left to run, which lets an
-external runner treat the process exit as "this instance is done" and start the next one — useful for
-driving several Minecraft instances in parallel. The game also exits when a failed input halts the
-batch, since it can make no further progress on its own; an inbox that is *not* empty after the exit
-(plus the halt line in the log) is what distinguishes that from a clean finish.
+`Quit game when finished` closes the game once the replays it started have all been processed, which
+lets an external runner treat the process exit as "this instance is done" and start the next one —
+useful for driving several Minecraft instances in parallel. It only applies to a batch that actually
+ran: if the inbox is empty the whole time there is nothing to finish, so the game keeps running and
+can be played normally. It does exit when a failed input halts the batch, since it can make no
+further progress on its own; an inbox that is *not* empty after the exit (plus the halt line in the
+log) is what distinguishes that from a clean finish.
 
 RGB is encoded to `rgb.mp4` through a **system-installed FFmpeg** (configurable codec/quality/keyframe
 interval and GPU-vs-CPU backend); actions and depth are still written even when no ffmpeg binary is
@@ -166,7 +168,7 @@ found.
 | **Record dataset** | `false` | Arm world-scoped dataset recording |
 | **Auto replay** | `false` | Automatically encode every pending replay in a private world |
 | **Eager encoding** | `false` | Auto replay: render/encode on a virtual clock as fast as the GPU and encoder allow |
-| **Quit game when finished** | `false` | Auto replay: exit the game once the inbox has nothing left to process, so a batch runner can wait on the process |
+| **Quit game when finished** | `false` | Auto replay: exit once the replays it started are all processed, so a batch runner can wait on the process (an empty inbox never triggers it) |
 | **Sample rate** | `20` Hz | Aligned samples per second (20 = one per tick) |
 | **Disable recipe book while recording** | `true` | Force manual crafting, so a recipe-book click can't fill the grid as one opaque action |
 | **Encoder backend** | `AUTO` | `AUTO` (GPU→CPU), `GPU`, or `CPU` ffmpeg encoding |
