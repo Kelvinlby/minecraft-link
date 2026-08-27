@@ -2,240 +2,234 @@
 
 [![build](https://img.shields.io/github/actions/workflow/status/Kelvinlby/minecraft-link/build.yml?branch=main&style=for-the-badge&logo=github&label=Build)](https://github.com/Kelvinlby/minecraft-link/actions/workflows/build.yml)
 
-A pair of client-side **Fabric** mods. **Open Crafter Link** bridges a running Minecraft client to an external
-**Open Crafter** controller over a small custom binary protocol on raw sockets. It streams the
-player's state and a real RGBD view of the world *out*, and applies movement / look / action
-instructions *in* — turning a vanilla client into a controllable embodied environment. The optional
-**Open Crafter Dataset Recorder** mod records aligned RGBD-frame + player-action datasets from human
-play or replayed packet sessions and depends on the core mod.
+Open Crafter Link connects a Minecraft client to an external controller. It lets a program observe
+the player and the world, then control the player through the same movement, interaction, and
+inventory actions available to a human.
 
-- `open-crafter-link-<version>.jar`: core link and virtual-camera features for ordinary users
-- `open-crafter-recorder-<version>.jar`: optional developer recorder and packet-replay tooling
+This repository builds two client-side Fabric mods:
 
-- **Minecraft:** 1.21.11 · **Loader:** Fabric · **Side:** client only
-- **Transport:** Unix domain sockets (`AF_UNIX`) by default — a faster local-only link — or
-  plain TCP (`AF_INET`) for a networked controller; selectable in the settings screen
-  (**Link → Transport**). Both use the same `u32-LE length + payload` framing with no
-  third-party dependency; each stream conflates to the newest message (queue depth 1)
+| Mod | File | Purpose |
+|-----|------|---------|
+| **Open Crafter Link** | `open-crafter-link-<version>.jar` | Live RGBD vision, player telemetry, remote control, and optional virtual cameras |
+| **Open Crafter Dataset Recorder** | `open-crafter-recorder-<version>.jar` | Optional dataset capture from human play or recorded server packet sessions |
 
-## How it works
+The recorder mod depends on Open Crafter Link. Install only the core JAR for ordinary controller
+use, or install both JARs to create datasets.
 
-The mod runs a `TcpBridge` or `UdsBridge` (both extending `AbstractLinkBridge`) with three
-independent streams. Each socket lives on its own worker thread; the game's tick and render
-threads only ever hand off through lock-free single-slot `AtomicReference`s, so neither
-game-critical thread blocks on I/O.
+## Features
 
-| Stream | Magic | Direction | Mod socket | Cadence |
-|--------|-------|-----------|------------|---------|
-| Telemetry    | `OCLO` | MC → controller | server bind `<tcpBind>:5557` | ~20 Hz (client tick) |
-| Vision (RGBD)| `OCLV` | MC → controller | server bind `<tcpBind>:5559` | up to `visionMaxHz` (render thread) |
-| Instructions | `OCLI` | controller → MC | client connect `<host>:5558` | applied per tick |
+### Open Crafter Link
 
-The mod **binds** its two outbound servers (stable, long-lived) and **connects** its inbound
-instruction stream to the controller's server. The UDS transport mirrors the same bind/connect
-split over `AF_UNIX` socket files. The controller host comes from the configured TCP URL; ports
-are canonical. See `BinaryCodec` for the exact little-endian wire layouts, and
-[`protocol/README.md`](protocol/README.md) for how the two codecs are kept in sync.
+- Streams player telemetry at Minecraft tick rate: rotation, selected hotbar slot, health, food,
+  air, experience level, and the current inventory/container state.
+- Streams a pre-HUD RGBD view of the world. RGB includes the rendered world and first-person hand;
+  depth contains normalized eye-space distance.
+- Accepts movement, sprinting, sneaking, jumping, absolute camera rotation, hotbar selection,
+  attack, and use controls.
+- Supports inventory operations such as pick, put, quick-move, swap, drop, distribute, and collect.
+- Uses Unix domain sockets for a fast same-machine connection by default, with TCP available for
+  controllers on another machine.
+- Includes a Python library and command-line controller under [`pylib/`](pylib/README.md).
+- Can expose RGB and depth as Linux virtual cameras for use in OBS, FFmpeg, browsers, and other
+  camera applications.
 
-### Control (inbound, `OCLI`)
-Each instruction lives for exactly one tick: `TickDriver` applies it and clears the slot,
-so a lagging controller never repeats a stale command (movement releases, rotation/slot
-hold). Supported: 7 movement flags (forward/back/left/right/jump/sprint/sneak), absolute
-yaw/pitch (pitch clamped to ±90°), hotbar slot select, and attack/use clicks. Clicks are
-routed through Minecraft's own `doAttack`/`doItemUse` via an `@Invoker` mixin, so they
-respect cooldowns and emit the same packets as a real mouse press.
+The protocol definition and wire-format details are documented in
+[`protocol/README.md`](protocol/README.md).
 
-An OCLI frame also carries an optional **inventory action** — `move` (quick-move / shift-click),
-`pick` (left-click), `put` (right-click), `swap` (number-key swap), `drop` (the vanilla drop
-key: with no screen open it drops one item from the selected hotbar stack; with a screen open it
-drops one item from the addressed slot), `distribute` (a left-click drag that splits the cursor
-stack evenly across a list of slots, emitted as the vanilla 3-stage `QUICK_CRAFT` sequence in a
-single tick), or `collect` (a double-click that gathers all matching stacks onto the cursor, emitted
-as `PICKUP` + `PICKUP_ALL`) — targeting slots by a stable `(group, index)` address (see Telemetry
-below). Because movement is a held level that
-conflates (newest wins) while an action is a discrete edge event, the bridge routes actions to a
-separate non-conflating FIFO queue so none is lost even while movement streams at ~30 Hz; the mod
-executes each via `interactionManager.clickSlot`.
+### Open Crafter Dataset Recorder
 
-### Telemetry (outbound, `OCLO`)
-Per-tick player state: yaw, pitch, selected hotbar slot, health, food, remaining air (ticks), XP level — followed by the
-current screen's **inventory**, normalized into stable groups (`hotbar` 0–8, `offhand` 0, `armor`
-0–3 head→feet, `inventory` 0–26, `cursor` 0, virtual `discard` 0, and an `extension` group named by
-the container's registry id, e.g. `minecraft:generic_9x3` / `minecraft:anvil` / `minecraft:crafting`).
-Each slot reports its item id (or empty), count, and enabled flag (auto-crafter slots can be
-toggled off). The mapping is screen-independent, so a `(group, index)` address means the same slot
-whether or not a container is open.
+The optional recorder produces aligned observations and actions for training or analysis. A saved
+session contains:
 
-### Vision (outbound, `OCLV`)
-Real RGBD captured on the render thread at the `WorldRenderEvents.END_MAIN` seam — after
-the 3D world and first-person hand, but **before the HUD** — so frames are the pure scene
-with no overlay. The GPU→CPU readback is asynchronous through a triple-buffered ring;
-frames are downsampled straight out of mapped GPU memory (nearest-neighbour, or box-filter
-for RGB when enabled) and the heavy float conversion + depth linearization runs off the
-render thread. RGB is packed as 8-bit channels and depth as normalized unsigned 16-bit values,
-reducing the wire payload without changing the decoded `0..1` API. Depth is linear eye-space
-distance normalized by the far plane, with `near`/`far` (blocks) carried in each frame header.
+- `rgb.mp4` — RGB video encoded with a system-installed FFmpeg
+- `depth.png.zip` — one 16-bit depth PNG per sample
+- `actions.jsonl` — player actions, state, inventory, timestamps, and frame metadata
+- `manifest.json` — session settings and final sample counts
 
-## Configuration
+It supports two recording modes:
 
-Settings live in an in-game screen (via [Mod Menu](https://modrinth.com/mod/modmenu) +
-[YACL](https://modrinth.com/mod/yacl)) and persist to
-`config/open-crafter-link.json`. Changes are applied live on save — the bridge rebinds and
-the vision resolution updates without a client restart.
+- **Live recording:** record RGBD frames and actions while a person plays in single-player or
+  multiplayer.
+- **Packet replay:** turn a packet session recorded on a Paper/Folia server into a dataset inside a
+  private, client-only replay world. Replay can run in real time or in eager mode as quickly as the
+  renderer and encoder allow.
 
-| Setting | Default | Effect |
-|---------|---------|--------|
-| **Transport** | `UDS` | Link transport — `UDS` (local `AF_UNIX`) or `TCP` (plain TCP, networked) |
-| **TCP URL** | `tcp://127.0.0.1` | TCP mode: controller host (host only; ports are canonical) for the inbound instruction stream |
-| **TCP bind address** | `127.0.0.1` | Local address for telemetry/vision servers; use `0.0.0.0` only for a trusted remote controller |
-| **UDS directory** | *(blank)* | UDS mode: directory for the `.sock` files; blank = auto-resolve |
-| **Camera width**  | `768` | Width of published vision frames (px) |
-| **Camera height** | `432` | Height of published vision frames (px) |
-| **RGB virtual camera** | `false` | Publish the colour feed as a webcam (Linux only) |
-| **Depth virtual camera** | `false` | Publish the depth feed as a grayscale webcam (Linux only) |
+## Requirements and platform support
 
-### Virtual cameras (preview + record with your own tools)
+| Requirement | Support |
+|-------------|---------|
+| Minecraft | **1.21.11** |
+| Mod loader | Fabric Loader **0.19.0 or newer** |
+| Java | **21 or newer** |
+| Operating systems | Linux, Windows, and macOS |
+| Required mods | Fabric API and YACL 3 |
+| Recommended mod | Mod Menu, for opening the settings screens |
 
-The **Sensors** tab can publish the RGB and depth feeds as two independent OS-level webcams, so any
-software that reads a camera — OBS, Discord, Zoom, a browser, `ffplay` — can preview or record what
-the agent sees. This is the way to record with your own codec, bitrate and scene composition instead
-of the built-in dataset recorder's fixed layout. Frames are sent **uncompressed** at the camera
-resolution above; depth is grayscale with **near = black and the sky = white** (distance normalized
-by the far plane). Each camera claims its own loopback device and toggles independently.
+The core link and dataset recording work on Linux, Windows, and macOS. A system FFmpeg installation
+is needed to write `rgb.mp4`; depth and action data are still saved if FFmpeg is unavailable. GPU
+encoding depends on the encoders exposed by the local FFmpeg build, and automatic mode can fall back
+to CPU encoding.
 
-**Linux only, and requires the `v4l2loopback` kernel module.** A real virtual camera device cannot be
-created from inside a mod jar on Windows (which needs an admin-registered DirectShow filter DLL) or
-macOS (which needs a signed CoreMediaIO Camera Extension with Apple entitlements); the checkboxes are
-disabled there. On Linux, load the module first:
+Virtual cameras are **Linux-only** and require FFmpeg plus the `v4l2loopback` kernel module. Windows
+and macOS can still use the RGBD network stream and dataset recorder normally.
+
+Unix domain sockets are intended for a controller running on the same machine. Use TCP when the
+controller is remote or when Unix sockets are unavailable in the local environment.
+
+## Install and run
+
+### 1. Install the mods
+
+Install Minecraft 1.21.11 with Fabric Loader, then place these dependencies in the profile's
+`mods/` directory:
+
+- Fabric API
+- YACL 3
+- Mod Menu (recommended)
+
+Add one or both Open Crafter JARs:
+
+- For controller use: add `open-crafter-link-dev.jar`.
+- For dataset recording: add both `open-crafter-link-dev.jar` and
+  `open-crafter-recorder-dev.jar`.
+
+Both Open Crafter JARs must have the same version.
+
+### 2. Configure Open Crafter Link
+
+Launch Minecraft and open **Mods → Open Crafter Link → Configure**.
+
+The default transport is **UDS**, which is suitable when Minecraft and the controller run on the
+same computer. Select **TCP** for a remote controller. The default TCP configuration listens for
+telemetry and vision on `127.0.0.1` and connects to the controller at `127.0.0.1`.
+
+Settings are stored in `config/open-crafter-link.json` and take effect when saved. Important options
+include transport, controller address, input staleness, camera resolution, and virtual-camera
+output.
+
+### 3. Run the Python controller
+
+Python 3.9 or newer is required. From this repository:
+
+```bash
+pip install ./pylib
+```
+
+Join a Minecraft world, then try:
+
+```bash
+ocl telemetry
+ocl vision --frames 3 --dump-dir ocl-frames
+ocl drive --forward --sprint --hold 2
+ocl roundtrip --yaw 90 --pitch 0
+```
+
+The Python client uses UDS by default, matching the mod. Use `--transport tcp` when the mod is set
+to TCP. See [`pylib/README.md`](pylib/README.md) for the library API, all CLI commands, endpoint
+configuration, and Flatpak socket-directory setup.
+
+## Record datasets
+
+Open **Mods → Open Crafter Dataset Recorder → Configure**. Recorder settings are stored separately
+in `config/open-crafter-recorder.json`.
+
+### Record human play
+
+1. Enable **Record dataset**.
+2. Set the sample rate and video options if needed.
+3. Join a single-player or multiplayer world and play normally.
+4. Leave the world to finish the session. A toast reports save progress.
+
+The completed dataset is written to:
+
+```text
+<game-directory>/open-crafter-link/recording/<timestamp>/
+```
+
+Recording uses the camera resolution configured in Open Crafter Link's **Sensors** settings.
+
+### Create a dataset from packet recordings
+
+Packet recordings come from the separate
+[`Kelvinlby/recorder`](https://github.com/Kelvinlby/recorder) Paper/Folia server plugin. That plugin
+records each player's client-to-server and server-to-client packets into a crash-tolerant `.mcrec`
+session.
+
+1. Install the server recorder plugin on a compatible Paper or Folia server.
+2. Join the server and perform the gameplay you want to capture.
+3. Disconnect so the plugin closes the session cleanly.
+4. On the server, use `/recorder list` and `/recorder dump <recording> 20` to confirm that the
+   session contains named packets with plausible timings.
+5. Copy the complete session directory from `plugins/recorder/recordings/` into:
+
+   ```text
+   <game-directory>/open-crafter-link/replay/
+   ```
+
+   Keep `session.json` and every `.mcrec` segment together in that directory.
+6. In the client recorder settings, enable **Record dataset** and **Auto replay**. Optionally enable
+   **Eager encoding** to process the session faster than real time.
+7. Return to the title screen. The mod processes the oldest session first and continues until the
+   replay inbox is empty.
+
+The recorded server packet protocol must exactly match this Minecraft 1.21.11 client. The server
+recorder may support additional Minecraft versions, but sessions from those versions cannot be
+replayed by this build.
+
+After a replay and its dataset save both succeed, the source session moves to `replay/done/`.
+Interrupted, incompatible, or failed sessions remain in `replay/` for inspection and retry. Output
+datasets are saved under `open-crafter-link/recording/`, just like live recordings.
+
+## Linux virtual cameras
+
+To publish both RGB and depth as cameras, install FFmpeg and `v4l2loopback`, then load two devices:
 
 ```bash
 sudo modprobe v4l2loopback devices=2 exclusive_caps=1,1 card_label="Minecraft RGB","Minecraft Depth"
 ```
 
-**`devices=2` matters:** the RGB and depth cameras each need their own node. With only one device
-loaded, enabling both leaves the second one off — the settings screen says so and names the fix.
-
-**`exclusive_caps=1` matters for Discord and Chromium:** they ignore or refuse a loopback node that
-advertises both capture *and* output capabilities, so the camera appears in the picker but fails to
-start (Discord reports **error 2011**). With exclusive caps the node advertises capture only. The
-trade-off is that the device is invisible until the mod actually streams to it, so tick the checkbox
-*before* selecting the camera in the consuming app.
-
-Persist it across reboots with `/etc/modules-load.d/` plus a `/etc/modprobe.d/` options file. The
-settings screen shows the exact command when no device is found, reports which device each camera is
-feeding while streaming, and explains any camera that could not start. Frames reach the device through the
-same **system-installed FFmpeg** the recorder uses, so a missing ffmpeg disables this too. If you run a
-sandboxed launcher (e.g. Flatpak Prism Launcher), grant device access as well:
+Enable **RGB virtual camera** and/or **Depth virtual camera** under Open Crafter Link's **Sensors**
+settings. Each enabled feed needs its own loopback device. With a Flatpak Minecraft launcher, device
+access may also be required; for Prism Launcher:
 
 ```bash
 flatpak override --user --device=all org.prismlauncher.PrismLauncher
 ```
 
-### Recording (optional dataset-recorder mod)
+## Build from source
 
-Install both jars to enable this section. Recorder settings live separately in
-`config/open-crafter-recorder.json`; an existing combined config is migrated on first launch.
-The recorder's Mod Menu screen arms dataset capture. With **Auto replay** off, every world you enter
-(single- or multiplayer) is captured to its own session under
-`<gameDir>/open-crafter-link/recording/<timestamp>/` and finalized (async, with a save-progress toast)
-when you leave the world. Each session holds aligned RGBD frames + player actions sampled at
-**Sample rate** Hz (default `20`, one per tick), recorded at the Sensors-tab camera resolution (the
-recorder taps the link's existing vision pipeline, so there is no separate recording resolution).
+Building requires Git and a Java 21 JDK. A separate Gradle installation is not needed because the
+repository includes the Gradle wrapper.
 
-With **Auto replay** on, the mod consumes the oldest recorder-plugin session from
-`<gameDir>/open-crafter-link/replay/`, opens a client-only in-memory replay world, and processes the
-entire inbox without waiting for the user to enter another world. No integrated server, terrain
-generator, or save is started. PLAY/S2C
-bytes are decoded with Minecraft's own packet codecs and applied as simulated server responses;
-PLAY/C2S bytes are decoded into timestamped movement, look, hotbar, attack/use, and inventory
-actions. The packet protocol number must match this Minecraft client. When the inbox is complete,
-the mod unloads the replay world and returns to the title screen.
-
-After replay and dataset finalization both succeed, the input file/session directory is moved to
-`replay/done/`; interrupted, incompatible, or failed inputs stay in the inbox for diagnosis
-and retry. `Eager encoding` replaces wall-clock pacing with one virtual sample interval per
-completed GPU capture, temporarily disables VSync and raises the client FPS cap, and blocks on encoder
-backpressure. Thus it changes only processing speed: output timestamps and MP4 FPS still follow the
-configured **Sample rate**. A top-right progress toast tracks indexed session progress; it is drawn
-after the recorder's pre-HUD RGB capture seam and therefore never appears in RGB or depth output.
-
-`Quit game when finished` closes the game once the replays it started have all been processed, which
-lets an external runner treat the process exit as "this instance is done" and start the next one —
-useful for driving several Minecraft instances in parallel. It only applies to a batch that actually
-ran: if the inbox is empty the whole time there is nothing to finish, so the game keeps running and
-can be played normally. It does exit when a failed input halts the batch, since it can make no
-further progress on its own; an inbox that is *not* empty after the exit (plus the halt line in the
-log) is what distinguishes that from a clean finish.
-
-RGB is encoded to `rgb.mp4` through a **system-installed FFmpeg** (configurable codec/quality/keyframe
-interval and GPU-vs-CPU backend); actions and depth are still written even when no ffmpeg binary is
-found.
-
-| Setting | Default | Effect |
-|---------|---------|--------|
-| **Record dataset** | `false` | Arm world-scoped dataset recording |
-| **Auto replay** | `false` | Automatically encode every pending replay in a private world |
-| **Eager encoding** | `false` | Auto replay: render/encode on a virtual clock as fast as the GPU and encoder allow |
-| **Quit game when finished** | `false` | Auto replay: exit once the replays it started are all processed, so a batch runner can wait on the process (an empty inbox never triggers it) |
-| **Sample rate** | `20` Hz | Aligned samples per second (20 = one per tick) |
-| **Disable recipe book while recording** | `true` | Force manual crafting, so a recipe-book click can't fill the grid as one opaque action |
-| **Encoder backend** | `AUTO` | `AUTO` (GPU→CPU), `GPU`, or `CPU` ffmpeg encoding |
-| **Codec** | `H264` | Output video codec (`H264` or `H265`) |
-| **Quality** | `18` | CRF/CQ (0–51, lower = better/larger) |
-| **Keyframe interval** | `2` s | Seconds between keyframes |
-| **FFmpeg path** | *(blank)* | Explicit ffmpeg binary for dataset video; blank = search `PATH` |
-
-### Launch-property overrides
-
-Set via JVM args (`-Docl.<name>=<value>`); when present, these win over the in-game settings.
-
-| Property | Default | Notes |
-|----------|---------|-------|
-| `ocl.visionWidth` / `ocl.visionHeight` | from settings | Pin the downsample resolution |
-| `ocl.visionMaxHz` | `40` | Cap on capture rate |
-| `ocl.visionBoxFilter` | `false` | Box-average RGB on downsample instead of nearest-neighbour |
-| `ocl.tcpHost` | from settings | TCP mode: pin the controller host the mod connects to for instructions |
-| `ocl.udsDir` | from settings | Pin the directory holding the UDS `.sock` files |
-| `ocl.ffmpegPath` | from settings | Pin the ffmpeg binary used by core virtual cameras |
-
-## Building
-
-A single Gradle wrapper manages both Fabric/Loom subprojects:
+On Linux or macOS:
 
 ```bash
-./gradlew build          # build both mods; place both distributable jars in build/libs/
-./gradlew buildCore      # build only the core mod
-./gradlew buildRecorder  # build the recorder (and required core compile inputs)
-./gradlew run            # launch a dev client with both mods
-./gradlew runCore        # launch a dev client with only the core mod
+git clone https://github.com/Kelvinlby/minecraft-link.git
+cd minecraft-link
+./gradlew build
 ```
 
-Both launch tasks use the same root `run/` game directory, so profiles, saves, options, and test
-configuration are shared between core-only and combined runs.
+On Windows PowerShell or Command Prompt, run `gradlew.bat build` instead.
 
-CI builds every push (see the badge above).
+The distributable JARs are placed in `build/libs/`:
 
-## Python client
+```text
+build/libs/open-crafter-link-dev.jar
+build/libs/open-crafter-recorder-dev.jar
+```
 
-[`pylib/`](pylib/README.md) is a pip-installable client library (`pip install ./pylib`, imported as
-`ocl`) exposing the full API — read telemetry, read the RGBD vision stream, and drive the
-player — plus an `ocl` command-line controller that exercises every link feature
-(telemetry, vision-with-PNG-dumps, drive/demo, and a closed-loop roundtrip).
-See [`pylib/README.md`](pylib/README.md) for setup and usage.
+Useful Gradle tasks:
 
-## Status
+| Command | Purpose |
+|---------|---------|
+| `./gradlew build` | Build and test both mods |
+| `./gradlew buildCore` | Build only Open Crafter Link |
+| `./gradlew buildRecorder` | Build the recorder and its required core inputs |
+| `./gradlew runCore` | Launch a development client with only the core mod |
+| `./gradlew run` | Launch a development client with both mods |
 
-The data plane — control, telemetry, and RGBD vision — is feature-complete, and the
-in-game settings are wired into the live runtime.
+Both development launch tasks use the repository's `run/` game directory.
 
-- **Transport:** UDS (real `AF_UNIX`, the default) or TCP (`AF_INET`, for a networked controller),
-  chosen in the settings screen. Both drop any ZeroMQ dependency: the link only needs conflated,
-  fire-and-forget binary messages, so each transport uses a trivial `u32-LE length + payload`
-  framing over Java's built-in sockets (UDS via JEP 380 `AF_UNIX`) — none of ZeroMQ's wire
-  machinery (ZMTP, PUB/SUB, routing) is required. The payload bytes are identical across both
-  transports; only the socket family differs. The Python controller (`pylib/`, imported as
-  `ocl`) speaks both. See [`pylib/README.md`](pylib/README.md) for the UDS socket paths and the
-  Flatpak-sandbox directory note.
-- **Vision downsampling** maps the framebuffer onto the target resolution per-axis with no
-  aspect-ratio correction; pick a camera width/height matching your window aspect to avoid
-  a squashed image (the 768×432 default suits a typical 16:9 window).
+## License
+
+Open Crafter Link is licensed under the [GNU General Public License v3.0](LICENSE).
