@@ -3,7 +3,7 @@
 GENERATED FROM protocol/protocol.json BY protocol/gen_constants.py — DO NOT EDIT BY HAND.
 """
 
-VERSION = 2
+VERSION = 3
 VIS_VERSION = 1
 
 # Movement bitmask (1 << position).

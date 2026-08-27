@@ -68,7 +68,8 @@ public final class GoldenVectors {
 			}
 			OutboundSnapshot snap = new OutboundSnapshot(
 					o.get("yaw").getAsFloat(), o.get("pitch").getAsFloat(), o.get("slot").getAsInt(),
-					o.get("health").getAsFloat(), o.get("food").getAsInt(), o.get("xp_level").getAsInt(),
+					o.get("health").getAsFloat(), o.get("food").getAsInt(), o.get("air").getAsInt(),
+					o.get("xp_level").getAsInt(),
 					new InventoryState(groups));
 			out.add(new OcloCase(o.get("name").getAsString(), o.get("bin").getAsString(), snap));
 		}

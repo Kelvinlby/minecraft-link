@@ -30,7 +30,7 @@ final class PacketActionInterpreter implements SampleSource {
 	private boolean attackPulse, interactPulse;
 	private int selectedSlot;
 	private float yaw, pitch, health;
-	private int food, xpLevel;
+	private int food, air, xpLevel;
 	private InventoryState inventory = InventoryState.EMPTY;
 	private final List<TimedInventoryAction> inventoryActions = new ArrayList<>();
 	private List<SlotAddress> dragSlots;
@@ -126,6 +126,7 @@ final class PacketActionInterpreter implements SampleSource {
 			selectedSlot = mc.player.getInventory().getSelectedSlot();
 			health = mc.player.getHealth();
 			food = mc.player.getHungerManager().getFoodLevel();
+			air = mc.player.getAir();
 			xpLevel = mc.player.experienceLevel;
 			inventory = InventoryMapper.readInventory(mc);
 		}
@@ -140,7 +141,7 @@ final class PacketActionInterpreter implements SampleSource {
 		}
 		ActionSet result = new ActionSet(front, back, left, right, jump, sprint, sneak,
 				attackHeld || attackPulse, interactHeld || interactPulse, selectedSlot,
-				yaw, pitch, health, food, xpLevel, due);
+				yaw, pitch, health, food, air, xpLevel, due);
 		attackPulse = false;
 		interactPulse = false;
 		return result;

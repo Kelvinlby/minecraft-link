@@ -150,6 +150,11 @@ public final class DatasetWriter {
 	}
 
 	private void writeActionLine(Sample s, boolean sizeOk) throws IOException {
+		actionsOut.write(formatActionLine(s, sizeOk));
+	}
+
+	/** Build one actions.jsonl row. Package-visible so the recorder schema can be tested without ffmpeg. */
+	static String formatActionLine(Sample s, boolean sizeOk) {
 		ActionSet a = s.action();
 		PackedFrame v = s.vision();
 		// Compact hand-built JSON — no dependency needed and the fields are all scalar.
@@ -171,6 +176,7 @@ public final class DatasetWriter {
 				.append(",\"pitch\":").append(fmt(a.pitch()))
 				.append(",\"health\":").append(fmt(a.health()))
 				.append(",\"food\":").append(a.food())
+				.append(",\"air\":").append(a.air())
 				.append(",\"xp_level\":").append(a.xpLevel())
 				.append(",\"near\":").append(fmt(v.near()))
 				.append(",\"far\":").append(fmt(v.far()))
@@ -181,7 +187,7 @@ public final class DatasetWriter {
 		sb.append(",\"inventory_state\":");
 		appendInventoryState(sb, s.inventory());
 		sb.append('}').append('\n');
-		actionsOut.write(sb.toString());
+		return sb.toString();
 	}
 
 	/**
@@ -309,7 +315,7 @@ public final class DatasetWriter {
 		boolean hasVideo = rgbEncoder != null;
 		String codec = (video.codec() == FfmpegEncoder.Codec.H265) ? "hevc" : "h264";
 		String json = "{\n"
-				+ "  \"schema_version\": 5,\n"
+				+ "  \"schema_version\": 6,\n"
 				+ "  \"start_epoch_ms\": " + startEpochMs + ",\n"
 				+ "  \"sample_hz\": " + fps + ",\n"
 				+ "  \"width\": " + width + ",\n"

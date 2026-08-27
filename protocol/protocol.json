@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "vis_version": 1,
   "movement_bits": {
     "FRONT": 0,

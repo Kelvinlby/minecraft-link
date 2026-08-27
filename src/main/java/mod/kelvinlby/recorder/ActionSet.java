@@ -35,6 +35,7 @@ import java.util.List;
  * @param pitch       look pitch in degrees ([-90, 90])
  * @param health      current health in half-heart points (0..20)
  * @param food        current hunger/food level (0..20)
+ * @param air         remaining underwater air in ticks (normally 0..300)
  * @param xpLevel     current experience level
  * @param inventoryActions discrete slot clicks observed this period, in order (empty if none)
  */
@@ -53,6 +54,7 @@ public record ActionSet(
 		float pitch,
 		float health,
 		int food,
+		int air,
 		int xpLevel,
 		List<InventoryAction> inventoryActions) {
 
@@ -63,11 +65,11 @@ public record ActionSet(
 	/** All released, slot 0, zero rotation, no inventory actions — written before any input is read. */
 	public static final ActionSet NEUTRAL =
 			new ActionSet(false, false, false, false, false, false, false, false, false, 0, 0.0f, 0.0f,
-					0.0f, 0, 0, List.of());
+					0.0f, 0, 0, 0, List.of());
 
 	/** This action set with a different inventory-action list — used by the sampler to attach drained clicks. */
 	public ActionSet withInventoryActions(List<InventoryAction> actions) {
 		return new ActionSet(front, back, left, right, jump, sprint, sneak, attack, interact,
-				selectedSlot, yaw, pitch, health, food, xpLevel, actions);
+				selectedSlot, yaw, pitch, health, food, air, xpLevel, actions);
 	}
 }

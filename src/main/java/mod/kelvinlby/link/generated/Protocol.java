@@ -10,7 +10,7 @@ package mod.kelvinlby.link.generated;
 public final class Protocol {
 	private Protocol() {}
 
-	public static final int VERSION = 2;
+	public static final int VERSION = 3;
 	public static final int VIS_VERSION = 1;
 
 	// Movement bitmask (1 << position).

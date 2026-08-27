@@ -19,12 +19,13 @@ import java.util.List;
  * — it has its own {@code OCLV} stream.
  * <pre>
  *   magic   : 4 bytes  "OCLO"
- *   version : u8       2
+ *   version : u8       3
  *   yaw     : f32
  *   pitch   : f32
  *   slot    : i32                     (0..8)
  *   health  : f32                     half-heart points (0..20)
  *   food    : i32                     hunger/food level (0..20)
+ *   air     : i32                     remaining underwater air in ticks (normally 0..300)
  *   xpLevel : i32                     experience level
  *   -- inventory section (variable length; self-delimiting) --
  *   groupCount : u8
@@ -45,7 +46,7 @@ import java.util.List;
  * event, routed to a non-conflating queue by the bridge).
  * <pre>
  *   magic   : 4 bytes  "OCLI"
- *   version : u8       2
+ *   version : u8       3
  *   move    : u8 bitmask  bit0 front, 1 back, 2 left, 3 right, 4 jump, 5 sprint, 6 sneak
  *   slot    : i32         -1 = no change, else clamp 0..8
  *   action  : u8 bitmask  bit0 attack, bit1 interact
@@ -106,7 +107,7 @@ public final class BinaryCodec {
 
 	/**
 	 * Encode a telemetry snapshot as an {@code OCLO} message: the fixed control prefix (header + yaw +
-	 * pitch + slot + health + food + xpLevel) followed by the variable-length inventory section. Sized in
+	 * pitch + slot + health + food + air + xpLevel) followed by the variable-length inventory section. Sized in
 	 * one measuring pass so a single {@link ByteBuffer} suffices.
 	 */
 	public static byte[] encodeOutbound(OutboundSnapshot s) {
@@ -114,7 +115,7 @@ public final class BinaryCodec {
 
 		// Pre-encode strings once (also gives us their byte lengths for sizing) to avoid encoding twice.
 		int prefix = HEADER + 4 /* yaw */ + 4 /* pitch */ + 4 /* slot */
-				+ 4 /* health */ + 4 /* food */ + 4 /* xpLevel */;
+				+ 4 /* health */ + 4 /* food */ + 4 /* air */ + 4 /* xpLevel */;
 		int size = prefix + 1 /* groupCount */;
 		List<byte[]> nameBytes = new ArrayList<>();
 		List<byte[]> itemBytes = new ArrayList<>();
@@ -137,6 +138,7 @@ public final class BinaryCodec {
 		buf.putInt(s.selectedSlot());
 		buf.putFloat(s.health());
 		buf.putInt(s.food());
+		buf.putInt(s.air());
 		buf.putInt(s.xpLevel());
 
 		buf.put((byte) inv.groups().size());

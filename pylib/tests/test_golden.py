@@ -40,6 +40,7 @@ class OcloDecodeTest(unittest.TestCase):
                 self.assertEqual(t.slot, case["slot"])
                 self.assertEqual(t.health, _f32(case["health"]))
                 self.assertEqual(t.food, case["food"])
+                self.assertEqual(t.air, case["air"])
                 self.assertEqual(t.xp_level, case["xp_level"])
 
                 groups = t.inventory.groups if t.inventory else ()

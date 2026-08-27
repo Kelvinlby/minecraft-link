@@ -40,6 +40,7 @@ public final class TickDriver {
 				player.getInventory().getSelectedSlot(),
 				player.getHealth(),
 				player.getHungerManager().getFoodLevel(),
+				player.getAir(),
 				player.experienceLevel,
 				InventoryMapper.readInventory(mc));
 	}

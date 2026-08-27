@@ -92,6 +92,7 @@ public final class ActionReader implements SampleSource {
 				player.getPitch(),
 				player.getHealth(),
 				player.getHungerManager().getFoodLevel(),
+				player.getAir(),
 				player.experienceLevel,
 				java.util.List.of());
 	}

@@ -8,7 +8,7 @@ telemetry, read the RGBD vision stream, and drive the player.
 
     with Ocl() as link:
         t = link.read_telemetry()                 # newest player state
-        print(t.yaw, t.pitch, t.slot, t.health, t.food, t.xp_level)
+        print(t.yaw, t.pitch, t.slot, t.health, t.food, t.air, t.xp_level)
 
         link.drive(forward=True, sprint=True)     # one instruction (hold from your loop)
         link.look(yaw=90, pitch=0)                # absolute rotation
@@ -272,13 +272,14 @@ class Telemetry:
     slot: int
     health: float
     food: int
+    air: int
     xp_level: int
     inventory: Optional[Inventory] = None
 
     def __str__(self) -> str:
         return (
             f"yaw={self.yaw:8.2f}  pitch={self.pitch:7.2f}  slot={self.slot}  "
-            f"health={self.health:5.1f}  food={self.food}  xp={self.xp_level}"
+            f"health={self.health:5.1f}  food={self.food}  air={self.air}  xp={self.xp_level}"
         )
 
 
@@ -354,16 +355,16 @@ class Instruction:
 # Codec                                                                        #
 # --------------------------------------------------------------------------- #
 def decode_telemetry(buf: bytes) -> Telemetry:
-    # magic[4] ver[1] yaw[f] pitch[f] slot[i] health[f] food[i] xpLevel[i]  then the inventory section.
-    if len(buf) < 5 + 4 + 4 + 4 + 4 + 4 + 4:
+    # magic[4] ver[1] yaw[f] pitch[f] slot[i] health[f] food[i] air[i] xpLevel[i], then inventory.
+    if len(buf) < 5 + 4 + 4 + 4 + 4 + 4 + 4 + 4:
         raise ValueError(f"OCLO too short: {len(buf)} bytes")
     if buf[:4] != MAGIC_OUT:
         raise ValueError(f"bad OCLO magic: {buf[:4]!r}")
     if buf[4] != VERSION:
         raise ValueError(f"bad OCLO version: {buf[4]}")
-    yaw, pitch, slot, health, food, xp_level = struct.unpack_from("<ffifii", buf, 5)
-    inventory = _decode_inventory(buf, 5 + 24)  # offset past the fixed 24-byte control block
-    return Telemetry(yaw, pitch, slot, health, food, xp_level, inventory)
+    yaw, pitch, slot, health, food, air, xp_level = struct.unpack_from("<ffifiii", buf, 5)
+    inventory = _decode_inventory(buf, 5 + 28)  # offset past the fixed 28-byte control block
+    return Telemetry(yaw, pitch, slot, health, food, air, xp_level, inventory)
 
 
 def _decode_inventory(buf: bytes, off: int) -> "Optional[Inventory]":
@@ -980,7 +981,8 @@ def read_actions_jsonl(path: str) -> Iterator[dict]:
     ``inventory_state`` object (``schema_version`` >= 5) — the observed screen contents that tick — is
     decoded into an :class:`Inventory` (same type the live controller returns), so you can query it with
     ``.by_name("hotbar")`` / ``.group(G_HOTBAR)``. Older files missing either field yield an empty list /
-    empty :class:`Inventory`. Pure stdlib (``json``); no extra deps.
+    empty :class:`Inventory`. Dataset schema version 6 adds the scalar integer ``air`` observation,
+    measured in remaining underwater-air ticks. Pure stdlib (``json``); no extra deps.
     """
     import json
 
@@ -1057,4 +1059,3 @@ def angle_close(a: float, b: float, tol: float) -> bool:
     """True if angles a and b (degrees) are within tol, accounting for wraparound."""
     d = (a - b + 180.0) % 360.0 - 180.0
     return abs(d) <= tol
-

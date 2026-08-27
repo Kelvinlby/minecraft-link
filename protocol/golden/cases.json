@@ -9,6 +9,7 @@
       "slot": 3,
       "health": 15.0,
       "food": 17,
+      "air": 123,
       "xp_level": 42,
       "inventory": [
         {
@@ -37,6 +38,7 @@
       "slot": 0,
       "health": 20.0,
       "food": 20,
+      "air": 300,
       "xp_level": 0,
       "inventory": []
     }

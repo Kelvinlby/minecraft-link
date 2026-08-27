@@ -54,7 +54,7 @@ separate non-conflating FIFO queue so none is lost even while movement streams a
 executes each via `interactionManager.clickSlot`.
 
 ### Telemetry (outbound, `OCLO`)
-Per-tick player state: yaw, pitch, selected hotbar slot, health, food, XP level — followed by the
+Per-tick player state: yaw, pitch, selected hotbar slot, health, food, remaining air (ticks), XP level — followed by the
 current screen's **inventory**, normalized into stable groups (`hotbar` 0–8, `offhand` 0, `armor`
 0–3 head→feet, `inventory` 0–26, `cursor` 0, virtual `discard` 0, and an `extension` group named by
 the container's registry id, e.g. `minecraft:generic_9x3` / `minecraft:anvil` / `minecraft:crafting`).
