@@ -92,16 +92,14 @@ public final class RecorderConfigScreen {
 								"Start in windowed mode at the recorder-owned window resolution below.",
 								defaults.resizeWindowAtLaunch, () -> cfg.resizeWindowAtLaunch,
 								v -> cfg.resizeWindowAtLaunch = v, true))
-						.option(Option.<Integer>createBuilder().name(Text.literal("Launch width"))
-								.binding(defaults.launchWindowWidth, () -> cfg.launchWindowWidth,
-										v -> cfg.launchWindowWidth = v)
-								.controller(o -> IntegerSliderControllerBuilder.create(o).range(320, 1920).step(16)
-										.formatValue(v -> Text.literal(v + " px"))).build())
-						.option(Option.<Integer>createBuilder().name(Text.literal("Launch height"))
+						.option(Option.<Integer>createBuilder().name(Text.literal("Height"))
 								.binding(defaults.launchWindowHeight, () -> cfg.launchWindowHeight,
 										v -> cfg.launchWindowHeight = v)
-								.controller(o -> IntegerSliderControllerBuilder.create(o).range(240, 1080).step(16)
-										.formatValue(v -> Text.literal(v + " px"))).build()).build())
+								.controller(o -> IntegerSliderControllerBuilder.create(o).range(16, 1080).step(1)).build())
+						.option(Option.<Integer>createBuilder().name(Text.literal("Width"))
+								.binding(defaults.launchWindowWidth, () -> cfg.launchWindowWidth,
+										v -> cfg.launchWindowWidth = v)
+								.controller(o -> IntegerSliderControllerBuilder.create(o).range(16, 1920).step(1)).build()).build())
 				.group(OptionGroup.createBuilder().name(Text.literal("Lightmap"))
 						.option(overrideGamma).option(gamma).build())
 				.group(OptionGroup.createBuilder().name(Text.literal("Status effects"))

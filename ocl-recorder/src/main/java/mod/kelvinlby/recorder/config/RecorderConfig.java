@@ -70,8 +70,8 @@ public final class RecorderConfig {
 		recordQuality = clamp(recordQuality, 0, 51);
 		recordKeyframeSec = clamp(recordKeyframeSec, 1, 30);
 		recordingGamma = Math.max(0.0, Math.min(10.0, recordingGamma));
-		launchWindowWidth = clamp(launchWindowWidth, 320, 1920);
-		launchWindowHeight = clamp(launchWindowHeight, 240, 1080);
+		launchWindowWidth = clamp(launchWindowWidth, 16, 1920);
+		launchWindowHeight = clamp(launchWindowHeight, 16, 1080);
 		if (recordBackend == null) recordBackend = FfmpegEncoder.Backend.AUTO;
 		if (recordCodec == null) recordCodec = FfmpegEncoder.Codec.H264;
 		if (nightVisionOverride == null) nightVisionOverride = EffectOverride.AS_RECORDED;
