@@ -25,9 +25,24 @@ import java.util.List;
 
 /** Converts decoded PLAY/C2S packets into the same absolute action vocabulary used for human datasets. */
 final class PacketActionInterpreter implements SampleSource {
+	/**
+	 * How long after a use-shaped packet a hand swing may still be that interaction's own animation
+	 * rather than a fresh attack click.
+	 *
+	 * <p>A client-predicted use (chest, crafting table, door, trapdoor, button, block placement) swings
+	 * inside the very same input tick that sent the interaction, so its swing is effectively
+	 * simultaneous. A server-authoritative use ({@code ActionResult.SUCCESS_SERVER} — beds are the
+	 * common case) makes the client swing only once the server's answering entity animation comes back,
+	 * which costs a network round trip plus up to a tick of scheduling on each end. This window covers
+	 * the slower of the two with margin; anything later is treated as a genuine attack.
+	 */
+	private static final long USE_SWING_WINDOW_MICROS = 400_000L;
+
 	private boolean front, back, left, right, jump, sprint, sneak;
 	private boolean attackHeld, interactHeld;
 	private boolean attackPulse, interactPulse;
+	/** Deadline before which one hand swing is owed to an earlier use/drop, or {@code Long.MIN_VALUE}. */
+	private long useSwingDeadlineMicros = Long.MIN_VALUE;
 	private int selectedSlot;
 	private float yaw, pitch, health;
 	private int food, air, xpLevel;
@@ -50,20 +65,27 @@ final class PacketActionInterpreter implements SampleSource {
 		} else if (packet instanceof UpdateSelectedSlotC2SPacket p) {
 			selectedSlot = Math.clamp(p.getSelectedSlot(), 0, 8);
 		} else if (packet instanceof HandSwingC2SPacket) {
-			attackPulse = true;
+			// A swing is evidence of an attack only when nothing else explains it. Vanilla swings the
+			// arm for an accepted use and for a drop too, so crediting every swing to the attack key
+			// phrased a phantom ATTACK right after each USE (see expectUseSwing).
+			if (micros <= useSwingDeadlineMicros) useSwingDeadlineMicros = Long.MIN_VALUE;
+			else attackPulse = true;
 		} else if (packet instanceof PlayerInteractBlockC2SPacket) {
 			interactPulse = true;
+			expectUseSwing(micros);
 		} else if (packet instanceof PlayerInteractItemC2SPacket p) {
 			// USE_ITEM is an edge, not evidence that the physical key remains down. Most item uses
 			// (placing, buckets, flint and steel, etc.) are instantaneous and consequently have no
 			// RELEASE_USE_ITEM packet. Continuous items are detected from the projected player's
 			// active-item state in refreshObservation(), after this packet has been locally applied.
 			interactPulse = true;
+			expectUseSwing(micros);
 			yaw = p.getYaw(); pitch = p.getPitch();
 		} else if (packet instanceof PlayerInteractEntityC2SPacket p) {
 			p.handle(new PlayerInteractEntityC2SPacket.Handler() {
-				@Override public void interact(net.minecraft.util.Hand hand) { interactPulse = true; }
-				@Override public void interactAt(net.minecraft.util.Hand hand, net.minecraft.util.math.Vec3d pos) { interactPulse = true; }
+				@Override public void interact(net.minecraft.util.Hand hand) { interactPulse = true; expectUseSwing(micros); }
+				@Override public void interactAt(net.minecraft.util.Hand hand, net.minecraft.util.math.Vec3d pos) { interactPulse = true; expectUseSwing(micros); }
+				// The attack itself already swings; that swing carries no information this packet lacks.
 				@Override public void attack() { attackPulse = true; }
 			});
 		} else if (packet instanceof PlayerActionC2SPacket p) {
@@ -71,9 +93,13 @@ final class PacketActionInterpreter implements SampleSource {
 				case START_DESTROY_BLOCK -> attackHeld = true;
 				case ABORT_DESTROY_BLOCK, STOP_DESTROY_BLOCK -> attackHeld = false;
 				case RELEASE_USE_ITEM -> interactHeld = false;
-				case DROP_ITEM, DROP_ALL_ITEMS -> inventoryActions.add(new TimedInventoryAction(micros,
-						new InventoryAction(InventoryAction.Op.DROP,
-								new SlotAddress(SlotGroup.HOTBAR, selectedSlot), null)));
+				case DROP_ITEM, DROP_ALL_ITEMS -> {
+					// Dropping a non-empty stack swings the arm as well, one packet later.
+					expectUseSwing(micros);
+					inventoryActions.add(new TimedInventoryAction(micros,
+							new InventoryAction(InventoryAction.Op.DROP,
+									new SlotAddress(SlotGroup.HOTBAR, selectedSlot), null)));
+				}
 				case SWAP_ITEM_WITH_OFFHAND -> inventoryActions.add(new TimedInventoryAction(micros,
 						new InventoryAction(InventoryAction.Op.SWAP,
 								new SlotAddress(SlotGroup.HOTBAR, selectedSlot),
@@ -88,6 +114,16 @@ final class PacketActionInterpreter implements SampleSource {
 				if (action.op() != InventoryAction.Op.NONE) inventoryActions.add(new TimedInventoryAction(micros, action));
 			}
 		}
+	}
+
+	/**
+	 * Note that the next hand swing within {@link #USE_SWING_WINDOW_MICROS} belongs to a use or drop
+	 * that has just been sent, not to the attack key. Only one swing is ever owed: an accepted
+	 * interaction swings either client-side or server-side, never both, and a later use simply moves
+	 * the deadline instead of queueing a second credit, so an unmatched swing still reads as an attack.
+	 */
+	private void expectUseSwing(long micros) {
+		useSwingDeadlineMicros = micros + USE_SWING_WINDOW_MICROS;
 	}
 
 	private void acceptDrag(ClickSlotC2SPacket packet, long micros, MinecraftClient mc) {

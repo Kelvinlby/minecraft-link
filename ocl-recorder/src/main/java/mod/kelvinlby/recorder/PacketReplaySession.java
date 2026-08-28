@@ -66,6 +66,25 @@ final class PacketReplaySession implements AutoCloseable {
 	 */
 	private static final long BACKPRESSURE_WAIT_MS = 2L;
 
+	/**
+	 * Recorded time consumed per client tick while the replay world is still being built, before any
+	 * frame can be sampled. Everything the bootstrap consumes is applied but never rendered, so the
+	 * stride is what decides how much of the recording the viewer never sees.
+	 *
+	 * <p>Until the game-join packets have produced a world there is nothing to wait for except more
+	 * packets, so the stream is pulled forward a whole second per tick.
+	 */
+	private static final long JOIN_STRIDE_MICROS = 1_000_000L;
+
+	/**
+	 * Recorded time consumed per client tick once the world exists and only vanilla's chunk-load gate
+	 * is left. That gate ({@code WorldRenderer.isRenderingReady}: the chunk under the player built and
+	 * faded in) is bound to wall time, not to the recording, so a recorded second per tick burned ~20
+	 * seconds of the input for every real second the renderer took - on a short recording, most of it.
+	 * One tick's worth per tick costs the recording only the time the wait really took.
+	 */
+	private static final long CHUNK_WAIT_STRIDE_MICROS = 50_000L;
+
 	private final PacketRecordingReader reader;
 	private final PacketActionInterpreter actions = new PacketActionInterpreter();
 	private final PacketPlayerProjector playerProjector = new PacketPlayerProjector();
@@ -172,6 +191,10 @@ final class PacketReplaySession implements AutoCloseable {
 	/**
 	 * Advance login/chunk bootstrap independently of RGBD capture. Eager capture cannot wait for a world
 	 * frame while vanilla's loading screen is itself waiting for later chunk packets in the recording.
+	 *
+	 * <p>The stream is pulled forward at two speeds - {@link #JOIN_STRIDE_MICROS} until the world
+	 * exists, then {@link #CHUNK_WAIT_STRIDE_MICROS} - because only the first wait is one the
+	 * recording can end. Whatever the bootstrap consumes is applied but never rendered.
 	 */
 	public void onClientTick(MinecraftClient mc) {
 		Runnable callback = null;
@@ -180,7 +203,8 @@ final class PacketReplaySession implements AutoCloseable {
 			// End of the client tick: vanilla has just ticked (and locally rotated) any ridden vehicle.
 			ReplayVehicleAnchor.reassert(mc);
 			if (captureReady) return;
-			bootstrapMicros += 1_000_000L; // consume one recorded second per client tick while loading
+			boolean worldUp = sawGameJoin && mc.player != null && mc.world != null;
+			bootstrapMicros += worldUp ? CHUNK_WAIT_STRIDE_MICROS : JOIN_STRIDE_MICROS;
 			advanceTo(bootstrapMicros, mc);
 			actions.refreshObservation(mc);
 			boolean loading = mc.currentScreen instanceof LevelLoadingScreen;
