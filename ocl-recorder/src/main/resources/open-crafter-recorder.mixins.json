@@ -9,11 +9,16 @@
 		"ClientPlayNetworkHandlerMixin",
 		"ClientPlayerEntityMixin",
 		"ClientPlayerInteractionManagerMixin",
+		"DarknessEffectFogModifierMixin",
 		"EntityMixin",
+		"FogRendererMixin",
+		"LightmapTextureManagerMixin",
 		"MinecraftClientAccessor",
 		"MinecraftClientRenderMixin",
 		"RenderTickCounterDynamicAccessor",
-		"RecipeBookScreenMixin"
+		"RecipeBookScreenMixin",
+		"StatusEffectFogModifierMixin",
+		"WorldRendererMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

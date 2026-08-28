@@ -5,6 +5,7 @@ import mod.kelvinlby.OpenCrafterLinkClient;
 import mod.kelvinlby.link.CaptureGateRegistry;
 import mod.kelvinlby.recorder.config.RecorderConfig;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
@@ -22,13 +23,24 @@ public final class OpenCrafterRecorderClient implements ClientModInitializer {
 		RecorderConfig cfg = RecorderConfig.get().normalize();
 		RECORDER.syncTo(cfg.recordDataset, cfg.autoReplay, cfg.eagerPacketEncoding,
 				cfg.quitWhenReplayFinished, cfg.recordSampleHz, cfg.toVideoSettings());
+		RecorderRenderingTweaks.sync(MinecraftClient.getInstance());
 	}
 
 	@Override public void onInitializeClient() {
 		CaptureGateRegistry.install(RECORDER.captureGate());
 		syncConfig();
+		ClientLifecycleEvents.CLIENT_STARTED.register(client -> {
+			RecorderConfig config = RecorderConfig.get().normalize();
+			if (!config.resizeWindowAtLaunch) return;
+			int width = config.launchWindowWidth;
+			int height = config.launchWindowHeight;
+			client.getWindow().setWindowedSize(width, height);
+			OpenCrafterLink.LOGGER.info("[open-crafter-recorder] resized window to recorder launch size {}x{}",
+					width, height);
+		});
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			RecorderRenderingTweaks.sync(client);
 			if (RECORDER.shouldReadLiveActions()) RECORDER.actionReader().onClientTick(client);
 			RECORDER.onClientTick(client);
 		});
@@ -37,6 +49,7 @@ public final class OpenCrafterRecorderClient implements ClientModInitializer {
 		WorldRenderEvents.START_MAIN.register(ctx -> RECORDER.onWorldRenderStart(MinecraftClient.getInstance()));
 
 		OpenCrafterLinkClient.registerBeforeShutdown(() -> {
+			RecorderRenderingTweaks.restoreGamma(MinecraftClient.getInstance());
 			RECORDER.shutdown();
 			CaptureGateRegistry.uninstall(RECORDER.captureGate());
 		});

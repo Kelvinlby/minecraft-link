@@ -9,12 +9,17 @@ import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.CRC32;
@@ -28,6 +33,8 @@ public final class PacketRecordingReader implements Closeable {
 	private static final int BLOCK = 0xB1;
 	private static final int END = 0xEE;
 	private static final int MAX_BLOCK = 256 * 1024 * 1024;
+	private static final int TAR_BLOCK = 512;
+	private static final int MAX_INDEX = 64 * 1024 * 1024;
 	private static final Gson GSON = new Gson();
 
 	public enum Direction { S2C, C2S }
@@ -45,7 +52,7 @@ public final class PacketRecordingReader implements Closeable {
 	}
 
 	private final Path source;
-	private final List<Path> segments;
+	private final List<SegmentSource> segments;
 	private int segmentIndex;
 	private Segment current;
 	private Header header;
@@ -53,24 +60,24 @@ public final class PacketRecordingReader implements Closeable {
 	/** Per-phase S2C {@code DISCONNECT} ids from the recorded protocol table; built on first use. */
 	private EnumMap<Phase, Integer> disconnectIds;
 
-	private PacketRecordingReader(Path source, List<Path> segments) throws IOException {
+	private PacketRecordingReader(Path source, PreparedSource prepared) throws IOException {
 		this.source = source;
-		this.segments = segments;
-		this.estimatedEndMicros = estimateEndMicros(source);
+		this.segments = prepared.segments;
+		this.estimatedEndMicros = prepared.estimatedEndMicros;
 		advanceSegment();
 		if (current == null) throw new IOException("recording has no readable segments: " + source);
 		this.header = current.header;
 		if (header.formatVersion > 1) throw new IOException("unsupported packet recording format " + header.formatVersion);
 	}
 
-	/** Find the oldest pending session (directory or standalone segment) without descending into done/. */
+	/** Find the oldest pending session (tar, legacy directory, or standalone segment) outside done/. */
 	public static PacketRecordingReader openNext(Path inbox) throws IOException {
 		List<Path> candidates = candidates(inbox);
 		IOException last = null;
 		for (Path candidate : candidates) {
 			try {
-				List<Path> segments = segmentsOf(candidate);
-				if (!segments.isEmpty()) return new PacketRecordingReader(candidate, segments);
+				PreparedSource prepared = prepare(candidate);
+				if (!prepared.segments.isEmpty()) return new PacketRecordingReader(candidate, prepared);
 			} catch (IOException e) {
 				last = e;
 				OpenCrafterLink.LOGGER.warn("[open-crafter-link] skipping unreadable packet recording {}", candidate, e);
@@ -84,7 +91,7 @@ public final class PacketRecordingReader implements Closeable {
 	public static boolean hasPending(Path inbox) throws IOException {
 		for (Path candidate : candidates(inbox)) {
 			try {
-				if (!segmentsOf(candidate).isEmpty()) return true;
+				if (!prepare(candidate).segments.isEmpty()) return true;
 			} catch (IOException e) {
 				// It is still an unprocessed replay; let openNext report the precise read error.
 				return true;
@@ -97,7 +104,8 @@ public final class PacketRecordingReader implements Closeable {
 		Files.createDirectories(inbox);
 		try (var stream = Files.list(inbox)) {
 			return stream.filter(p -> !p.getFileName().toString().equals("done"))
-					.filter(p -> Files.isDirectory(p) || p.getFileName().toString().endsWith(".mcrec"))
+					.filter(p -> Files.isDirectory(p) || p.getFileName().toString().endsWith(".mcrec")
+							|| p.getFileName().toString().endsWith(".tar"))
 					.sorted(Comparator.comparingLong(PacketRecordingReader::modified).thenComparing(Path::toString))
 					.toList();
 		}
@@ -108,45 +116,181 @@ public final class PacketRecordingReader implements Closeable {
 		catch (IOException ignored) { return Long.MAX_VALUE; }
 	}
 
-	private static List<Path> segmentsOf(Path source) throws IOException {
-		if (!Files.isDirectory(source)) return List.of(source);
+	private static PreparedSource prepare(Path source) throws IOException {
+		if (source.getFileName().toString().endsWith(".tar")) return prepareTar(source);
+		if (!Files.isDirectory(source)) return new PreparedSource(List.of(fileSource(source)), -1L);
 		Path index = source.resolve("session.json");
 		if (Files.isRegularFile(index)) {
 			Index parsed = GSON.fromJson(Files.readString(index), Index.class);
 			if (parsed != null && parsed.segments != null) {
-				List<Path> result = new ArrayList<>();
+				List<SegmentSource> result = new ArrayList<>();
 				for (IndexSegment segment : parsed.segments) {
 					Path file = source.resolve(segment.file).normalize();
 					if (!file.getParent().equals(source.normalize())) throw new IOException("segment escapes session folder");
-					if (Files.isRegularFile(file)) result.add(file);
+					if (Files.isRegularFile(file)) result.add(fileSource(file));
 				}
-				if (!result.isEmpty()) return result;
+				if (!result.isEmpty()) return new PreparedSource(result, estimateEndMicros(parsed));
 			}
 		}
 		try (var stream = Files.list(source)) {
-			return stream.filter(Files::isRegularFile)
+			List<SegmentSource> result = stream.filter(Files::isRegularFile)
 					.filter(p -> p.getFileName().toString().endsWith(".mcrec"))
-					.sorted(Comparator.comparing(p -> p.getFileName().toString())).toList();
+					.sorted(Comparator.comparing(p -> p.getFileName().toString()))
+					.map(PacketRecordingReader::fileSource).toList();
+			return new PreparedSource(result, -1L);
 		}
 	}
+
+	private static PreparedSource prepareTar(Path archive) throws IOException {
+		List<TarMember> members = listTar(archive);
+		Map<String, TarMember> byName = new HashMap<>();
+		for (TarMember member : members) {
+			if (byName.put(member.name, member) != null)
+				throw new IOException("duplicate tar member " + member.name + " in " + archive);
+		}
+		TarMember indexMember = byName.get("session.json");
+		if (indexMember == null) throw new IOException("tar has no session.json: " + archive);
+		if (indexMember.size > MAX_INDEX) throw new IOException("session.json is too large in " + archive);
+		Index index;
+		try (InputStream in = openTarMember(archive, indexMember)) {
+			byte[] json = in.readNBytes((int) indexMember.size);
+			if (json.length != indexMember.size) throw new EOFException("truncated session.json in " + archive);
+			try { index = GSON.fromJson(new String(json, StandardCharsets.UTF_8), Index.class); }
+			catch (RuntimeException e) { throw new IOException("invalid session.json in " + archive, e); }
+		}
+		if (index == null || index.segments == null) throw new IOException("invalid session.json in " + archive);
+		List<SegmentSource> result = new ArrayList<>();
+		for (IndexSegment segment : index.segments) {
+			if (!isSimpleName(segment.file)) throw new IOException("invalid segment name in " + archive);
+			TarMember member = byName.get(segment.file);
+			if (member == null) throw new IOException("tar is missing indexed segment " + segment.file + ": " + archive);
+			result.add(tarSource(archive, member));
+		}
+		return new PreparedSource(result, estimateEndMicros(index));
+	}
+
+	private static boolean isSimpleName(String name) {
+		return name != null && !name.isEmpty() && !name.contains("/") && !name.contains("\\")
+				&& !name.equals(".") && !name.equals("..");
+	}
+
+	private static SegmentSource fileSource(Path file) {
+		return new SegmentSource(file.toString(), () -> Files.newInputStream(file));
+	}
+
+	private static SegmentSource tarSource(Path archive, TarMember member) {
+		return new SegmentSource(archive + "!" + member.name, () -> openTarMember(archive, member));
+	}
+
+	@FunctionalInterface private interface StreamOpener { InputStream open() throws IOException; }
+	private record SegmentSource(String name, StreamOpener opener) {}
+	private record PreparedSource(List<SegmentSource> segments, long estimatedEndMicros) {}
+	private record TarMember(String name, long offset, long size) {}
 
 	private static final class Index { List<IndexSegment> segments; }
 	private static final class IndexSegment { String file; long lastMicros; }
 
-	private static long estimateEndMicros(Path source) {
-		if (!Files.isDirectory(source)) return -1L;
-		Path index = source.resolve("session.json");
-		if (!Files.isRegularFile(index)) return -1L;
-		try {
-			Index parsed = GSON.fromJson(Files.readString(index), Index.class);
-			long end = -1L;
-			if (parsed != null && parsed.segments != null) {
-				for (IndexSegment segment : parsed.segments) end = Math.max(end, segment.lastMicros);
-			}
-			return end;
-		} catch (IOException | RuntimeException ignored) {
-			return -1L;
+	private static long estimateEndMicros(Index index) {
+		long end = -1L;
+		if (index != null && index.segments != null) {
+			for (IndexSegment segment : index.segments) end = Math.max(end, segment.lastMicros);
 		}
+		return end;
+	}
+
+	/** Read the regular-file members emitted by the recorder's small ustar writer. */
+	private static List<TarMember> listTar(Path archive) throws IOException {
+		List<TarMember> members = new ArrayList<>();
+		try (SeekableByteChannel channel = Files.newByteChannel(archive, StandardOpenOption.READ)) {
+			long archiveSize = channel.size();
+			ByteBuffer header = ByteBuffer.allocate(TAR_BLOCK);
+			for (long position = 0; position + TAR_BLOCK <= archiveSize;) {
+				header.clear();
+				channel.position(position);
+				if (!readFully(channel, header)) break;
+				byte[] bytes = header.array();
+				if (zeroBlock(bytes)) break;
+				String name = cString(bytes, 0, 100);
+				if (name.isEmpty()) throw new IOException("tar member has no name in " + archive);
+				long size = parseTarOctal(bytes, 124, 12, archive);
+				long offset = position + TAR_BLOCK;
+				if (size < 0 || size > archiveSize - offset)
+					throw new IOException("truncated tar member " + name + " in " + archive);
+				byte type = bytes[156];
+				if (type == 0 || type == '0') members.add(new TarMember(name, offset, size));
+				long blocks = (size + TAR_BLOCK - 1) / TAR_BLOCK;
+				if (blocks > (Long.MAX_VALUE - offset) / TAR_BLOCK)
+					throw new IOException("implausible tar member size in " + archive);
+				position = offset + blocks * TAR_BLOCK;
+			}
+		}
+		return members;
+	}
+
+	private static InputStream openTarMember(Path archive, TarMember member) throws IOException {
+		SeekableByteChannel channel = Files.newByteChannel(archive, StandardOpenOption.READ);
+		try {
+			channel.position(member.offset);
+			return new BoundedInputStream(Channels.newInputStream(channel), member.size);
+		} catch (IOException | RuntimeException e) {
+			channel.close();
+			throw e;
+		}
+	}
+
+	private static boolean readFully(SeekableByteChannel channel, ByteBuffer buffer) throws IOException {
+		while (buffer.hasRemaining()) if (channel.read(buffer) < 0) return false;
+		return true;
+	}
+
+	private static boolean zeroBlock(byte[] bytes) {
+		for (byte value : bytes) if (value != 0) return false;
+		return true;
+	}
+
+	private static String cString(byte[] bytes, int offset, int length) {
+		int end = offset;
+		while (end < offset + length && bytes[end] != 0) end++;
+		return new String(bytes, offset, end - offset, StandardCharsets.US_ASCII);
+	}
+
+	private static long parseTarOctal(byte[] bytes, int offset, int length, Path archive) throws IOException {
+		if ((bytes[offset] & 0x80) != 0) throw new IOException("base-256 tar field is not supported: " + archive);
+		long value = 0;
+		for (int i = offset; i < offset + length; i++) {
+			int c = bytes[i] & 255;
+			if (c == 0 || c == ' ') continue;
+			if (c < '0' || c > '7') throw new IOException("corrupt tar numeric field in " + archive);
+			value = value * 8 + (c - '0');
+		}
+		return value;
+	}
+
+	private static final class BoundedInputStream extends InputStream {
+		private final InputStream delegate;
+		private long remaining;
+
+		BoundedInputStream(InputStream delegate, long remaining) {
+			this.delegate = delegate;
+			this.remaining = remaining;
+		}
+
+		@Override public int read() throws IOException {
+			if (remaining == 0) return -1;
+			int value = delegate.read();
+			if (value >= 0) remaining--;
+			return value;
+		}
+
+		@Override public int read(byte[] bytes, int offset, int length) throws IOException {
+			if (length == 0) return 0;
+			if (remaining == 0) return -1;
+			int read = delegate.read(bytes, offset, (int)Math.min(length, remaining));
+			if (read > 0) remaining -= read;
+			return read;
+		}
+
+		@Override public void close() throws IOException { delegate.close(); }
 	}
 
 	public Header header() { return header; }
@@ -211,10 +355,10 @@ public final class PacketRecordingReader implements Closeable {
 
 	private void advanceSegment() throws IOException {
 		while (current == null && segmentIndex < segments.size()) {
-			Path file = segments.get(segmentIndex++);
-			try { current = new Segment(file); }
+			SegmentSource segment = segments.get(segmentIndex++);
+			try { current = new Segment(segment); }
 			catch (IOException e) {
-				OpenCrafterLink.LOGGER.warn("[open-crafter-link] unreadable segment {}; continuing", file, e);
+				OpenCrafterLink.LOGGER.warn("[open-crafter-link] unreadable segment {}; continuing", segment.name, e);
 			}
 		}
 	}
@@ -233,11 +377,11 @@ public final class PacketRecordingReader implements Closeable {
 		private boolean first;
 		private boolean ended;
 
-		Segment(Path file) throws IOException {
-			in = new BufferedInputStream(Files.newInputStream(file), 1 << 16);
+		Segment(SegmentSource source) throws IOException {
+			in = new BufferedInputStream(source.opener.open(), 1 << 16);
 			try {
 				byte[] magic = in.readNBytes(MAGIC.length);
-				if (!java.util.Arrays.equals(magic, MAGIC)) throw new IOException("bad MCREC1 magic: " + file);
+				if (!java.util.Arrays.equals(magic, MAGIC)) throw new IOException("bad MCREC1 magic: " + source.name);
 				int len = readIntStrict(in);
 				if (len < 0 || len > 64 * 1024 * 1024) throw new IOException("invalid header length " + len);
 				byte[] json = in.readNBytes(len);

@@ -54,6 +54,34 @@ class PacketRecordingReaderTest {
 	}
 
 	@Test
+	void streamsACompletedTarRecordingWithoutExtraction() throws Exception {
+		Path staging = temp.resolve("staging");
+		Files.createDirectories(staging);
+		byte[] payload = records();
+		String header = "{\"formatVersion\":1,\"protocolVersion\":777,\"minecraftVersion\":\"test\","
+				+ "\"playerName\":\"Alex\",\"codecId\":0}";
+		writeSegment(staging, header, payload, 1_000L);
+		byte[] segment = Files.readAllBytes(staging.resolve("0000.mcrec"));
+		String index = "{\"segments\":[{\"file\":\"0000.mcrec\",\"lastMicros\":1250}]}";
+		Path archive = temp.resolve("2026-08-28_Alex.tar");
+		writeTar(archive, index.getBytes(StandardCharsets.UTF_8), segment);
+		Files.delete(staging.resolve("0000.mcrec"));
+		Files.delete(staging);
+
+		assertTrue(PacketRecordingReader.hasPending(temp));
+		try (PacketRecordingReader reader = PacketRecordingReader.openNext(temp)) {
+			assertNotNull(reader);
+			assertEquals(archive, reader.source());
+			assertEquals(1_250L, reader.estimatedEndMicros());
+			assertEquals(1_000L, reader.next().timeMicros());
+			assertEquals(1_250L, reader.next().timeMicros());
+			assertNull(reader.next());
+		}
+		assertFalse(Files.exists(temp.resolve("session.json")));
+		assertFalse(Files.exists(temp.resolve("0000.mcrec")));
+	}
+
+	@Test
 	void identifiesTheSessionEndingDisconnectFromTheProtocolTable() throws Exception {
 		Path inbox = temp.resolve("inbox");
 		Path session = inbox.resolve("session");
@@ -117,6 +145,45 @@ class PacketRecordingReaderTest {
 		bytes.write(8); writeVar(bytes, 0); writeVar(bytes, 2); bytes.write(new byte[]{1, 2});
 		bytes.write(9); writeVar(bytes, 250); writeVar(bytes, 1); bytes.write(3);
 		return bytes.toByteArray();
+	}
+
+	private static void writeTar(Path archive, byte[] index, byte[] segment) throws Exception {
+		ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+		writeTarMember(bytes, "session.json", index);
+		writeTarMember(bytes, "0000.mcrec", segment);
+		bytes.write(new byte[1024]);
+		Files.write(archive, bytes.toByteArray());
+	}
+
+	private static void writeTarMember(ByteArrayOutputStream out, String name, byte[] payload) throws Exception {
+		byte[] header = new byte[512];
+		byte[] nameBytes = name.getBytes(StandardCharsets.US_ASCII);
+		System.arraycopy(nameBytes, 0, header, 0, nameBytes.length);
+		putOctal(header, 100, 8, 0644);
+		putOctal(header, 108, 8, 0);
+		putOctal(header, 116, 8, 0);
+		putOctal(header, 124, 12, payload.length);
+		putOctal(header, 136, 12, 0);
+		java.util.Arrays.fill(header, 148, 156, (byte)' ');
+		header[156] = '0';
+		byte[] magic = "ustar\0".getBytes(StandardCharsets.US_ASCII);
+		System.arraycopy(magic, 0, header, 257, magic.length);
+		int checksum = 0;
+		for (byte value : header) checksum += value & 255;
+		byte[] checksumBytes = String.format("%06o", checksum).getBytes(StandardCharsets.US_ASCII);
+		System.arraycopy(checksumBytes, 0, header, 148, checksumBytes.length);
+		header[154] = 0;
+		header[155] = ' ';
+		out.write(header);
+		out.write(payload);
+		int remainder = payload.length % 512;
+		if (remainder != 0) out.write(new byte[512 - remainder]);
+	}
+
+	private static void putOctal(byte[] target, int offset, int length, long value) {
+		byte[] text = String.format("%0" + (length - 1) + "o", value).getBytes(StandardCharsets.US_ASCII);
+		System.arraycopy(text, 0, target, offset, length - 1);
+		target[offset + length - 1] = 0;
 	}
 
 	private static void writeVar(ByteArrayOutputStream out, long value) {

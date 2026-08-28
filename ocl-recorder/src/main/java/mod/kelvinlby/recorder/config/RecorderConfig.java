@@ -16,6 +16,17 @@ import java.nio.file.Path;
 
 /** Recorder-only configuration, migrated once from the former combined OCL config. */
 public final class RecorderConfig {
+	public enum EffectOverride {
+		AS_RECORDED("As recorded"),
+		FORCE_ENABLED("Force enabled"),
+		FORCE_DISABLED("Force disabled");
+
+		private final String label;
+
+		EffectOverride(String label) { this.label = label; }
+		public String label() { return label; }
+	}
+
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("open-crafter-recorder.json");
 	private static final Path LEGACY_PATH = FabricLoader.getInstance().getConfigDir().resolve("open-crafter-link.json");
@@ -32,6 +43,13 @@ public final class RecorderConfig {
 	public int recordQuality = 18;
 	public int recordKeyframeSec = 2;
 	public String ffmpegPath = "";
+	public boolean overrideGamma;
+	public double recordingGamma = 0.5;
+	public boolean resizeWindowAtLaunch = true;
+	public int launchWindowWidth = 768;
+	public int launchWindowHeight = 432;
+	public EffectOverride nightVisionOverride = EffectOverride.AS_RECORDED;
+	public EffectOverride darknessOverride = EffectOverride.AS_RECORDED;
 
 	public static RecorderConfig get() {
 		if (instance == null) instance = load();
@@ -51,8 +69,13 @@ public final class RecorderConfig {
 		recordSampleHz = clamp(recordSampleHz, 1, 60);
 		recordQuality = clamp(recordQuality, 0, 51);
 		recordKeyframeSec = clamp(recordKeyframeSec, 1, 30);
+		recordingGamma = Math.max(0.0, Math.min(10.0, recordingGamma));
+		launchWindowWidth = clamp(launchWindowWidth, 320, 1920);
+		launchWindowHeight = clamp(launchWindowHeight, 240, 1080);
 		if (recordBackend == null) recordBackend = FfmpegEncoder.Backend.AUTO;
 		if (recordCodec == null) recordCodec = FfmpegEncoder.Codec.H264;
+		if (nightVisionOverride == null) nightVisionOverride = EffectOverride.AS_RECORDED;
+		if (darknessOverride == null) darknessOverride = EffectOverride.AS_RECORDED;
 		if (ffmpegPath == null) ffmpegPath = "";
 		return this;
 	}

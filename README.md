@@ -131,7 +131,12 @@ configuration, and Flatpak socket-directory setup.
 ## Record datasets
 
 Open **Mods → Open Crafter Dataset Recorder → Configure**. Recorder settings are stored separately
-in `config/open-crafter-recorder.json`.
+in `config/open-crafter-recorder.json`. The settings screen separates recording, auto replay, and
+rendering controls into tabs; video encoding is grouped under Rendering. Rendering overrides apply
+during ordinary gameplay as well as recording, so their gamma, night vision, and darkness results
+can be previewed without capturing a dataset. Effect overrides do not change real effect state. By
+default, launch also switches to windowed mode and uses the recorder-owned launch width and height;
+these values and the resize toggle live in the Rendering tab.
 
 ### Record human play
 
@@ -152,21 +157,22 @@ Recording uses the camera resolution configured in Open Crafter Link's **Sensors
 
 Packet recordings come from the separate
 [`Kelvinlby/recorder`](https://github.com/Kelvinlby/recorder) Paper/Folia server plugin. That plugin
-records each player's client-to-server and server-to-client packets into a crash-tolerant `.mcrec`
-session.
+records each player's client-to-server and server-to-client packets into a crash-tolerant session,
+then publishes the completed recording as an uncompressed `.tar` containing `session.json` and its
+`.mcrec` segment chain.
 
 1. Install the server recorder plugin on a compatible Paper or Folia server.
 2. Join the server and perform the gameplay you want to capture.
 3. Disconnect so the plugin closes the session cleanly.
 4. On the server, use `/recorder list` and `/recorder dump <recording> 20` to confirm that the
    session contains named packets with plausible timings.
-5. Copy the complete session directory from `plugins/recorder/recordings/` into:
+5. Copy the completed session `.tar` from `plugins/recorder/recordings/` into:
 
    ```text
    <game-directory>/open-crafter-link/replay/
    ```
 
-   Keep `session.json` and every `.mcrec` segment together in that directory.
+   The tar can be copied as-is; it does not need to be extracted.
 6. In the client recorder settings, enable **Record dataset** and **Auto replay**. Optionally enable
    **Eager encoding** to process the session faster than real time.
 7. Return to the title screen. The mod processes the oldest session first and continues until the

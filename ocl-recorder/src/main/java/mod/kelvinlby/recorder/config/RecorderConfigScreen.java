@@ -6,12 +6,14 @@ import dev.isxander.yacl3.api.Option;
 import dev.isxander.yacl3.api.OptionDescription;
 import dev.isxander.yacl3.api.OptionGroup;
 import dev.isxander.yacl3.api.YetAnotherConfigLib;
+import dev.isxander.yacl3.api.controller.DoubleSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.EnumControllerBuilder;
 import dev.isxander.yacl3.api.controller.IntegerSliderControllerBuilder;
 import dev.isxander.yacl3.api.controller.StringControllerBuilder;
 import dev.isxander.yacl3.api.controller.TickBoxControllerBuilder;
 import mod.kelvinlby.media.FfmpegEncoder;
 import mod.kelvinlby.recorder.OpenCrafterRecorderClient;
+import mod.kelvinlby.recorder.config.RecorderConfig.EffectOverride;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
@@ -22,13 +24,7 @@ public final class RecorderConfigScreen {
 
 	public static Screen create(Screen parent) {
 		RecorderConfig cfg = RecorderConfig.get();
-		RecorderConfig defaults = new RecorderConfig();
-		ConfigCategory.Builder cat = ConfigCategory.createBuilder().name(Text.literal("Recording"));
-		if (!FfmpegEncoder.available(cfg.ffmpegPath)) {
-			cat.option(LabelOption.create(Text.literal(
-					"⚠ FFmpeg not found — RGB video will be omitted; actions and depth still record.")
-					.formatted(Formatting.RED)));
-		}
+		RecorderConfig defaults = new RecorderConfig().normalize();
 
 		Option<Boolean> autoReplay = boolOption("Auto replay",
 				"Consume packet recordings from <gameDir>/open-crafter-link/replay in a client-only world.",
@@ -61,20 +57,79 @@ public final class RecorderConfigScreen {
 			quit.setAvailable(value && autoReplay.pendingValue());
 		});
 
-		cat.option(enabled).option(autoReplay).option(eager).option(quit).option(disableRecipeBook)
-				.option(Option.<Integer>createBuilder()
-						.name(Text.literal("Sample rate"))
-						.description(OptionDescription.of(Text.literal("Aligned samples per second; 20 Hz matches Minecraft ticks.")))
-						.binding(defaults.recordSampleHz, () -> cfg.recordSampleHz, v -> cfg.recordSampleHz = v)
-						.controller(o -> IntegerSliderControllerBuilder.create(o).range(1, 60).step(1)
-								.formatValue(v -> Text.literal(v + " Hz"))).build())
-				.group(videoGroup(cfg, defaults));
+		Option<Integer> sampleRate = Option.<Integer>createBuilder()
+				.name(Text.literal("Sample rate"))
+				.description(OptionDescription.of(Text.literal("Aligned samples per second; 20 Hz matches Minecraft ticks.")))
+				.binding(defaults.recordSampleHz, () -> cfg.recordSampleHz, v -> cfg.recordSampleHz = v)
+				.controller(o -> IntegerSliderControllerBuilder.create(o).range(1, 60).step(1)
+						.formatValue(v -> Text.literal(v + " Hz"))).build();
+
+		Option<Double> gamma = Option.<Double>createBuilder().name(Text.literal("Gamma"))
+				.description(OptionDescription.of(Text.literal(
+						"Gamma used by the lightmap during gameplay and in captured frames.")))
+				.binding(defaults.recordingGamma, () -> cfg.recordingGamma, v -> cfg.recordingGamma = v)
+				.controller(o -> DoubleSliderControllerBuilder.create(o).range(0.0, 10.0).step(0.01)
+						.formatValue(v -> Text.literal(String.format("%.2f", v))))
+				.available(cfg.overrideGamma).build();
+		Option<Boolean> overrideGamma = boolOption("Override gamma",
+				"Use the configured gamma during ordinary gameplay and recording.", defaults.overrideGamma,
+				() -> cfg.overrideGamma, v -> cfg.overrideGamma = v, true);
+		overrideGamma.addListener((option, value) -> gamma.setAvailable(value));
+
+		ConfigCategory.Builder recording = ConfigCategory.createBuilder().name(Text.literal("Recording"))
+				.option(enabled).option(sampleRate).option(disableRecipeBook);
+		ConfigCategory.Builder replay = ConfigCategory.createBuilder().name(Text.literal("Auto replay"))
+				.option(autoReplay).option(eager).option(quit);
+		ConfigCategory.Builder rendering = ConfigCategory.createBuilder().name(Text.literal("Rendering"));
+		if (!FfmpegEncoder.available(cfg.ffmpegPath)) {
+			rendering.option(LabelOption.create(Text.literal(
+					"⚠ FFmpeg not found — RGB video will be omitted; actions and depth still record.")
+					.formatted(Formatting.RED)));
+		}
+		rendering.group(videoGroup(cfg, defaults))
+				.group(OptionGroup.createBuilder().name(Text.literal("Window"))
+						.option(boolOption("Resize window at launch",
+								"Start in windowed mode at the recorder-owned window resolution below.",
+								defaults.resizeWindowAtLaunch, () -> cfg.resizeWindowAtLaunch,
+								v -> cfg.resizeWindowAtLaunch = v, true))
+						.option(Option.<Integer>createBuilder().name(Text.literal("Launch width"))
+								.binding(defaults.launchWindowWidth, () -> cfg.launchWindowWidth,
+										v -> cfg.launchWindowWidth = v)
+								.controller(o -> IntegerSliderControllerBuilder.create(o).range(320, 1920).step(16)
+										.formatValue(v -> Text.literal(v + " px"))).build())
+						.option(Option.<Integer>createBuilder().name(Text.literal("Launch height"))
+								.binding(defaults.launchWindowHeight, () -> cfg.launchWindowHeight,
+										v -> cfg.launchWindowHeight = v)
+								.controller(o -> IntegerSliderControllerBuilder.create(o).range(240, 1080).step(16)
+										.formatValue(v -> Text.literal(v + " px"))).build()).build())
+				.group(OptionGroup.createBuilder().name(Text.literal("Lightmap"))
+						.option(overrideGamma).option(gamma).build())
+				.group(OptionGroup.createBuilder().name(Text.literal("Status effects"))
+						.option(effectOption("Night vision",
+								"Override night-vision rendering during gameplay and recording without changing the player's real effect state.",
+								defaults.nightVisionOverride, () -> cfg.nightVisionOverride,
+								v -> cfg.nightVisionOverride = v))
+						.option(effectOption("Darkness",
+								"Override darkness rendering during gameplay and recording without changing the player's real effect state.",
+								defaults.darknessOverride, () -> cfg.darknessOverride,
+								v -> cfg.darknessOverride = v)).build());
 
 		return YetAnotherConfigLib.createBuilder()
 				.title(Text.literal("Open Crafter Dataset Recorder"))
-				.category(cat.build())
+				.category(recording.build()).category(replay.build())
+				.category(rendering.build())
 				.save(() -> { cfg.save(); OpenCrafterRecorderClient.syncConfig(); })
 				.build().generateScreen(parent);
+	}
+
+	private static Option<EffectOverride> effectOption(String name, String description, EffectOverride fallback,
+			java.util.function.Supplier<EffectOverride> getter,
+			java.util.function.Consumer<EffectOverride> setter) {
+		return Option.<EffectOverride>createBuilder().name(Text.literal(name))
+				.description(OptionDescription.of(Text.literal(description)))
+				.binding(fallback, getter, setter)
+				.controller(o -> EnumControllerBuilder.create(o).enumClass(EffectOverride.class)
+						.formatValue(v -> Text.literal(v.label()))).build();
 	}
 
 	private static Option<Boolean> boolOption(String name, String description, boolean fallback,
