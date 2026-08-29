@@ -1,0 +1,532 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import org.gradle.api.tasks.options.Option
+import org.gradle.work.DisableCachingByDefault
+
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
+
+/** One packet-recording input, tracked from the source inbox through to its archive destination. */
+class EncodeItem {
+	/** The untouched original under {@code --input}; only ever moved once its encode has succeeded. */
+	Path original
+	/** File name of the link/copy placed in a worker's replay inbox; also the key used to match it back. */
+	String name
+	/** Bytes, used only to balance the workers. */
+	long bytes
+}
+
+/** One Minecraft process: its private game directory, its share of the inputs, and its outcome. */
+class EncodeWorker {
+	int index
+	Path gameDir
+	Path udsDir
+	/** Private LWJGL native-extraction directory; the shared default is not concurrency-safe. */
+	Path nativesDir
+	List<EncodeItem> items = []
+	long bytes
+	Process process
+	int exit = -1
+	/** Inputs the client archived into {@code replay/done}; their originals move to {@code <input>/done}. */
+	List<EncodeItem> encoded = []
+	/** Inputs the client left in {@code replay}; their originals stay put in {@code <input>} for a retry. */
+	List<EncodeItem> leftover = []
+	/** Session directories collected out of {@code recording/} into {@code --output}. */
+	List<String> datasets = []
+	Throwable failure
+}
+
+/**
+ * Batch dataset encoder: fans the packet recordings in {@code --input} out over {@code --process}
+ * head-full Minecraft clients and collects their datasets into {@code --output}.
+ *
+ * <p><b>Why each client gets its own game directory.</b> A Minecraft profile is not safe to share
+ * between concurrent clients — {@code logs/}, {@code .fabric/}, {@code config/}, {@code options.txt}
+ * and the mod's own {@code open-crafter-link/} inbox are all written by every instance — so each
+ * worker runs in {@code build/encode/w<i>}, seeded from {@code run/}: the bulky read-only parts
+ * ({@code mods/}, {@code resourcepacks/}, …) are symlinked back to the real profile, while the
+ * written parts are private per worker. The user's {@code run/} is never modified.
+ *
+ * <p><b>Why inputs are linked rather than moved.</b> The mod archives a finished input by renaming it
+ * into {@code replay/done}. If the originals themselves were handed to the workers, an interrupted
+ * batch would strand them inside {@code build/}. Instead each worker's inbox holds a symlink (falling
+ * back to a hard link, then a copy) and the original never leaves {@code --input} until this task has
+ * seen its link land in {@code replay/done} — so aborting at any point loses nothing.
+ *
+ * <p><b>Why the recorder config is forced.</b> The batch's completion signal is the client quitting
+ * itself once its inbox drains, which only happens with record + auto replay + quit-when-finished all
+ * enabled. Those three keys are overridden in each worker's copy of the config; every other setting
+ * (codec, quality, sample rate, resolution, gamma) is taken from {@code run/config} as-is.
+ */
+@DisableCachingByDefault(because = 'Runs Minecraft; never up to date')
+abstract class EncodeTask extends DefaultTask {
+	/**
+	 * Profile entries a concurrent client would fight over. Everything else in the profile is linked
+	 * into each worker; these are copied ({@code config}, {@code options.txt}), left for the client to
+	 * create fresh ({@code logs}, {@code .fabric}, …), or deliberately omitted ({@code saves} — packet
+	 * replay builds a client-only world and never touches a save).
+	 */
+	private static final List<String> PRIVATE_ENTRIES = [
+			'open-crafter-link', 'config', 'options.txt', 'logs', 'crash-reports', 'debug',
+			'screenshots', 'saves', 'data', 'downloads', 'usercache.json', 'command_history.txt',
+			'.fabric', '.mixin.out', 'realms_persistence.json',
+	].asImmutable()
+
+	/** Serializes destination-name selection while workers collect into a shared output directory. */
+	private static final Object COLLECT_LOCK = new Object()
+
+	/**
+	 * PRIME render offload, for a machine whose display hangs off the integrated GPU: without these the
+	 * clients render on whatever GLX hands them, which on such a box is the iGPU or llvmpipe.
+	 */
+	private static final Map<String, String> NVIDIA_OFFLOAD_ENV = [
+			__NV_PRIME_RENDER_OFFLOAD: '1', __GLX_VENDOR_LIBRARY_NAME: 'nvidia',
+	].asImmutable()
+
+	/** Recorder settings the batch depends on, forced in each worker's copy of the profile config. */
+	private static final Map<String, Object> FORCED_RECORDER_CONFIG = [
+			recordDataset: true, autoReplay: true, quitWhenReplayFinished: true,
+	].asImmutable()
+
+	@Optional @Input
+	@Option(option = 'process', description = 'Number of Minecraft clients to run in parallel.')
+	abstract Property<String> getProcessCount()
+
+	@Optional @Input
+	@Option(option = 'input', description = 'Directory of packet recordings to encode; results move to <input>/done.')
+	abstract Property<String> getInputDir()
+
+	@Optional @Input
+	@Option(option = 'output', description = 'Directory that collects the recorded dataset sessions.')
+	abstract Property<String> getOutputDir()
+
+	@Optional @Input
+	@Option(option = 'nvidia', description = 'Render on an NVIDIA dGPU via PRIME offload.')
+	abstract Property<Boolean> getNvidia()
+
+	/** {@code -n}. Gradle gives a task option one name, so the short form is its own property. */
+	@Optional @Input
+	@Option(option = 'n', description = 'Short form of --nvidia.')
+	abstract Property<Boolean> getNvidiaShort()
+
+	/** The Minecraft profile every worker is seeded from; the project's ordinary dev-run directory. */
+	@Internal abstract DirectoryProperty getProfileDir()
+
+	/** Where the per-worker game directories live. Under build/ so `clean` disposes of them. */
+	@Internal abstract DirectoryProperty getWorkRoot()
+
+	/** Name of the Loom run task, in this project, whose exact launch command the workers reuse. */
+	@Internal abstract Property<String> getRunTaskName()
+
+	@TaskAction
+	void encode() {
+		int requested = parseCount(processCount.orNull)
+		Path inputRoot = resolveDir(inputDir.orNull, 'input')
+		Path outputRoot = resolveDir(outputDir.orNull, 'output')
+
+		List<EncodeItem> inputs = discoverInputs(inputRoot)
+		if (inputs.isEmpty()) throw new GradleException("no packet recordings found in ${inputRoot}")
+
+		// A client with an empty inbox never reaches its quit condition, so never start an idle worker.
+		int count = Math.min(requested, inputs.size())
+		if (count < requested) {
+			logger.lifecycle("encode: only ${inputs.size()} input(s); running ${count} client(s) instead of ${requested}")
+		}
+
+		boolean nvidiaOffload = nvidia.getOrElse(false) || nvidiaShort.getOrElse(false)
+		if (nvidiaOffload) logger.lifecycle("encode: PRIME render offload on (${NVIDIA_OFFLOAD_ENV})")
+
+		List<EncodeWorker> workers = distribute(inputs, count)
+		JavaExec runTask = (JavaExec) project.tasks.getByName(runTaskName.get())
+		List<String> command = launchCommand(runTask)
+
+		Path work = workRoot.get().asFile.toPath()
+		Path profile = profileDir.get().asFile.toPath()
+		Files.createDirectories(outputRoot)
+		Files.createDirectories(inputRoot.resolve('done'))
+
+		workers.each { worker ->
+			worker.gameDir = work.resolve("w${worker.index}")
+			// Kept outside the game directory, which is rebuilt every run, so the unpacked natives cache.
+			worker.nativesDir = work.resolve("natives").resolve("w${worker.index}")
+			worker.udsDir = shortRuntimeDir("ocl-enc${worker.index}")
+			Files.createDirectories(worker.nativesDir)
+			seedGameDir(profile, worker.gameDir)
+			Path inbox = worker.gameDir.resolve('open-crafter-link').resolve('replay')
+			Files.createDirectories(inbox)
+			worker.items.each { item -> link(inbox.resolve(item.name), item.original) }
+			logger.lifecycle("encode: worker ${worker.index} <- ${worker.items.size()} input(s), ${humanBytes(worker.bytes)}")
+		}
+
+		try {
+			List<Thread> threads = workers.collect { worker ->
+				Thread.start("ocl-encode-${worker.index}") {
+					try {
+						runWorker(worker, command, runTask, nvidiaOffload)
+						collect(worker, inputRoot, outputRoot)
+					} catch (Throwable t) {
+						worker.failure = t
+					}
+				}
+			}
+			threads*.join()
+		} finally {
+			workers.each { worker -> if (worker.process?.isAlive()) worker.process.destroyForcibly() }
+		}
+
+		report(workers, inputRoot, outputRoot)
+	}
+
+	// ---------------------------------------------------------------- arguments
+
+	static int parseCount(String raw) {
+		if (raw == null || raw.isBlank()) throw new GradleException('--process is required, e.g. --process 4')
+		int value
+		try { value = Integer.parseInt(raw.trim()) }
+		catch (NumberFormatException ignored) { throw new GradleException("--process must be a number, got '${raw}'") }
+		if (value < 1) throw new GradleException("--process must be at least 1, got ${value}")
+		return value
+	}
+
+	/** Relative paths resolve against the project root, matching every other path in a Gradle build. */
+	Path resolveDir(String raw, String option) {
+		if (raw == null || raw.isBlank()) throw new GradleException("--${option} is required, e.g. --${option} path/to/dir")
+		return project.rootProject.file(raw.trim()).toPath().toAbsolutePath().normalize()
+	}
+
+	// ---------------------------------------------------------------- inputs
+
+	/** The same set the mod's replay inbox scanner accepts: tars, .mcrec segments, legacy directories. */
+	static List<EncodeItem> discoverInputs(Path root) {
+		if (!Files.isDirectory(root)) throw new GradleException("--input is not a directory: ${root}")
+		List<Path> entries = Files.list(root).withCloseable { stream ->
+			stream.filter { it.fileName.toString() != 'done' }
+					.filter { Files.isDirectory(it) || it.fileName.toString().endsWith('.mcrec') || it.fileName.toString().endsWith('.tar') }
+					.sorted()
+					.toList()
+		}
+		return entries.collect { path ->
+			new EncodeItem(original: path, name: path.fileName.toString(), bytes: sizeOf(path))
+		}
+	}
+
+	/**
+	 * Longest-processing-time-first: hand each input, largest to smallest, to whichever worker is
+	 * currently carrying the least. Balancing on bytes rather than file count keeps a few long sessions
+	 * from parking on one client while the rest idle.
+	 */
+	static List<EncodeWorker> distribute(List<EncodeItem> inputs, int count) {
+		List<EncodeWorker> workers = (0..<count).collect { new EncodeWorker(index: it) }
+		inputs.sort { a, b -> Long.compare(b.bytes, a.bytes) }.each { item ->
+			EncodeWorker lightest = workers.min { it.bytes }
+			lightest.items << item
+			lightest.bytes += item.bytes
+		}
+		return workers
+	}
+
+	// ---------------------------------------------------------------- game directories
+
+	/**
+	 * Build a worker's game directory from the shared profile: link what is only read, copy what the
+	 * client writes, and leave the rest for Minecraft to recreate.
+	 */
+	void seedGameDir(Path profile, Path gameDir) {
+		deleteRecursively(gameDir)
+		Files.createDirectories(gameDir)
+		if (Files.isDirectory(profile)) {
+			Files.list(profile).withCloseable { stream ->
+				stream.filter { !PRIVATE_ENTRIES.contains(it.fileName.toString()) }
+						.toList()
+						.each { entry -> link(gameDir.resolve(entry.fileName.toString()), entry) }
+			}
+			Path config = profile.resolve('config')
+			if (Files.isDirectory(config)) copyRecursively(config, gameDir.resolve('config'))
+			Path options = profile.resolve('options.txt')
+			if (Files.isRegularFile(options)) copyRecursively(options, gameDir.resolve('options.txt'))
+		}
+		Files.createDirectories(gameDir.resolve('config'))
+		forceRecorderConfig(gameDir.resolve('config').resolve('open-crafter-recorder.json'))
+	}
+
+	/** Rewrite only the keys the batch depends on, preserving every other setting from the profile. */
+	void forceRecorderConfig(Path configFile) {
+		Map json = [:]
+		if (Files.isRegularFile(configFile)) {
+			try {
+				def parsed = new JsonSlurper().parse(configFile.toFile())
+				if (parsed instanceof Map) json = (Map) parsed
+			} catch (Exception e) {
+				logger.warn("encode: could not read ${configFile}, starting from recorder defaults (${e.message})")
+			}
+		}
+		json.putAll(FORCED_RECORDER_CONFIG)
+		Files.writeString(configFile, JsonOutput.prettyPrint(JsonOutput.toJson(json)))
+	}
+
+	/**
+	 * The UDS socket names are fixed, so N clients sharing a socket directory would fight over the same
+	 * three paths. Give each worker its own, kept short because AF_UNIX caps the whole path near 104
+	 * bytes — which is also why this cannot simply live inside the (deep) worker game directory.
+	 */
+	static Path shortRuntimeDir(String name) {
+		String base = System.getenv('XDG_RUNTIME_DIR') ?: System.getProperty('java.io.tmpdir')
+		Path dir = Path.of(base, name)
+		Files.createDirectories(dir)
+		return dir
+	}
+
+	// ---------------------------------------------------------------- launching
+
+	/**
+	 * Reuse the run task's own resolved launch line — java binary, @argfile classpath, dev-launch-injector
+	 * properties, main class — so a worker is exactly what {@code ./gradlew run} starts, differing only in
+	 * its working directory (which is what Minecraft takes as the game directory).
+	 */
+	static List<String> launchCommand(JavaExec runTask) {
+		List<String> jvmArgs = new ArrayList<>(runTask.jvmArguments.get())
+		List<String> command = [runTask.javaLauncher.get().executablePath.asFile.absolutePath]
+		// Loom passes the classpath inside the @argfile when it can; only add -cp when it did not.
+		if (!jvmArgs.any { it.startsWith('@') }) {
+			command += ['-cp', runTask.classpath.files.collect { it.absolutePath }.join(File.pathSeparator)]
+		}
+		command += jvmArgs
+		command += runTask.mainClass.get()
+		command += (runTask.args ?: []).collect { it as String }
+		runTask.argumentProviders.each { provider -> provider.asArguments().each { command += (it as String) } }
+		return command
+	}
+
+	void runWorker(EncodeWorker worker, List<String> command, JavaExec runTask, boolean nvidiaOffload) {
+		List<String> full = new ArrayList<>(command)
+		full.addAll(command.indexOf(runTask.mainClass.get()), [
+				// The link's UDS filenames are fixed, so clients sharing a socket directory would fight
+				// over the same three paths.
+				"-Docl.udsDir=${worker.udsDir}".toString(),
+				// LWJGL unpacks its natives into one shared temp directory keyed only by version, and
+				// clients starting together race there — the loser dies on "Failed to locate library".
+				"-Dorg.lwjgl.system.SharedLibraryExtractPath=${worker.nativesDir}".toString(),
+		])
+
+		ProcessBuilder builder = new ProcessBuilder(full)
+		builder.directory(worker.gameDir.toFile())
+		builder.redirectErrorStream(true)
+		builder.redirectOutput(worker.gameDir.resolve('encode-console.log').toFile())
+		runTask.environment.each { key, value -> if (value != null) builder.environment().put(key as String, value as String) }
+		// Applied last so the offload request wins over anything inherited from the daemon.
+		if (nvidiaOffload) builder.environment().putAll(NVIDIA_OFFLOAD_ENV)
+
+		logger.lifecycle("encode: worker ${worker.index} starting in ${worker.gameDir}")
+		worker.process = builder.start()
+		worker.process.outputStream.close() // the client never reads stdin here
+		worker.exit = worker.process.waitFor()
+		logger.lifecycle("encode: worker ${worker.index} exited with ${worker.exit}")
+	}
+
+	// ---------------------------------------------------------------- collection
+
+	/**
+	 * Drain one finished worker: archive the originals whose links reached {@code replay/done}, leave the
+	 * rest untouched in {@code --input} for a later retry, and move the datasets into {@code --output}.
+	 */
+	void collect(EncodeWorker worker, Path inputRoot, Path outputRoot) {
+		Path replay = worker.gameDir.resolve('open-crafter-link').resolve('replay')
+		Map<String, EncodeItem> byName = worker.items.collectEntries { [(it.name): it] }
+
+		Path done = replay.resolve('done')
+		if (Files.isDirectory(done)) {
+			Files.list(done).withCloseable { it.toList() }.each { archived ->
+				EncodeItem item = byName.get(stripCollisionSuffix(archived.fileName.toString()))
+				if (item == null) {
+					logger.warn("encode: worker ${worker.index} archived an unexpected entry ${archived.fileName}")
+					return
+				}
+				// The archived entry is this worker's link/copy; the original is still in --input.
+				deleteRecursively(archived)
+				moveInto(item.original, inputRoot.resolve('done'), item.name)
+				worker.encoded << item
+			}
+		}
+
+		// Anything still in the inbox failed, was incompatible, or was never reached. Drop the link only.
+		if (Files.isDirectory(replay)) {
+			Files.list(replay).withCloseable { it.toList() }.each { pending ->
+				if (pending.fileName.toString() == 'done') return
+				EncodeItem item = byName.get(pending.fileName.toString())
+				deleteRecursively(pending)
+				if (item != null) worker.leftover << item
+			}
+		}
+
+		Path recording = worker.gameDir.resolve('open-crafter-link').resolve('recording')
+		if (Files.isDirectory(recording)) {
+			Files.list(recording).withCloseable { it.toList() }.each { session ->
+				// Session directory names are timestamps to the second, so two workers can collide.
+				String collected = moveInto(session, outputRoot, session.fileName.toString(), "-w${worker.index}")
+				worker.datasets << collected
+			}
+		}
+
+		deleteRecursively(worker.udsDir)
+	}
+
+	/** The mod appends {@code .1}, {@code .2}, … when archiving over an existing name. */
+	static String stripCollisionSuffix(String name) {
+		return name.replaceFirst(/\.\d+$/, '')
+	}
+
+	/**
+	 * Move into {@code target} under a free name, falling back to copy+delete when the two are on
+	 * different filesystems.
+	 *
+	 * <p>Workers collect concurrently into one output directory and dataset names are timestamps to the
+	 * second, so two of them routinely propose the same name. Choosing the name and claiming it happen
+	 * under one lock — either the rename itself lands (the common, same-filesystem case) or an empty
+	 * placeholder reserves the name — after which the slow copy runs unlocked.
+	 */
+	static String moveInto(Path source, Path target, String name, String hint = '') {
+		Files.createDirectories(target)
+		boolean directory = Files.isDirectory(source)
+		Path destination
+		synchronized (COLLECT_LOCK) {
+			destination = target.resolve(name)
+			if (Files.exists(destination) && !hint.isEmpty()) destination = target.resolve(name + hint)
+			for (int i = 1; Files.exists(destination); i++) destination = target.resolve(name + hint + '.' + i)
+			try {
+				Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE)
+				return destination.fileName.toString()
+			} catch (Exception ignored) {
+				if (directory) Files.createDirectory(destination) else Files.createFile(destination)
+			}
+		}
+		copyRecursively(source, destination)
+		deleteRecursively(source)
+		return destination.fileName.toString()
+	}
+
+	// ---------------------------------------------------------------- reporting
+
+	void report(List<EncodeWorker> workers, Path inputRoot, Path outputRoot) {
+		int encoded = workers.sum(0) { it.encoded.size() } as int
+		int leftover = workers.sum(0) { it.leftover.size() } as int
+		int datasets = workers.sum(0) { it.datasets.size() } as int
+		logger.lifecycle("encode: ${encoded} input(s) encoded into ${datasets} dataset(s) under ${outputRoot}")
+		logger.lifecycle("encode: sources archived to ${inputRoot.resolve('done')}")
+
+		List<String> problems = []
+		workers.each { worker ->
+			if (worker.failure != null) problems << "worker ${worker.index} failed: ${worker.failure}"
+			if (worker.exit != 0) problems << "worker ${worker.index} exited with ${worker.exit} (see ${worker.gameDir.resolve('encode-console.log')})"
+			worker.leftover.each { problems << "not encoded: ${it.original}" }
+		}
+		if (leftover > 0) {
+			logger.lifecycle("encode: ${leftover} input(s) were left in ${inputRoot} and can be retried")
+		}
+		if (!problems.isEmpty()) {
+			throw new GradleException("encode finished with problems:\n  " + problems.join('\n  '))
+		}
+	}
+
+	// ---------------------------------------------------------------- filesystem helpers
+
+	/**
+	 * Symlink where possible so the profile and the inputs are shared rather than duplicated; fall back
+	 * to a hard link, then a copy, for filesystems and platforms that refuse links (notably Windows
+	 * without developer mode).
+	 */
+	static void link(Path target, Path source) {
+		Files.createDirectories(target.parent)
+		try {
+			Files.createSymbolicLink(target, source.toAbsolutePath())
+			return
+		} catch (IOException | UnsupportedOperationException ignored) {
+			// fall through
+		}
+		if (Files.isRegularFile(source)) {
+			try {
+				Files.createLink(target, source)
+				return
+			} catch (IOException | UnsupportedOperationException ignored) {
+				// fall through
+			}
+		}
+		copyRecursively(source, target)
+	}
+
+	static long sizeOf(Path path) {
+		if (Files.isRegularFile(path)) return Files.size(path)
+		long[] total = [0L]
+		Files.walkFileTree(path, new SimpleFileVisitor<Path>() {
+			@Override FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+				total[0] += attrs.size()
+				return FileVisitResult.CONTINUE
+			}
+			@Override FileVisitResult visitFileFailed(Path file, IOException e) { return FileVisitResult.CONTINUE }
+		})
+		return total[0]
+	}
+
+	static void copyRecursively(Path source, Path target) {
+		if (!Files.isDirectory(source)) {
+			Files.createDirectories(target.parent)
+			Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
+			return
+		}
+		Files.walkFileTree(source, new SimpleFileVisitor<Path>() {
+			@Override FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+				Files.createDirectories(target.resolve(source.relativize(dir).toString()))
+				return FileVisitResult.CONTINUE
+			}
+			@Override FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+				Files.copy(file, target.resolve(source.relativize(file).toString()), StandardCopyOption.REPLACE_EXISTING)
+				return FileVisitResult.CONTINUE
+			}
+		})
+	}
+
+	/** Deletes links as links: walkFileTree does not follow them, so the profile is never touched. */
+	static void deleteRecursively(Path path) {
+		if (!Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+		Files.walkFileTree(path, new SimpleFileVisitor<Path>() {
+			@Override FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+				Files.deleteIfExists(file)
+				return FileVisitResult.CONTINUE
+			}
+			@Override FileVisitResult postVisitDirectory(Path dir, IOException e) {
+				Files.deleteIfExists(dir)
+				return FileVisitResult.CONTINUE
+			}
+		})
+	}
+
+	static String humanBytes(long bytes) {
+		if (bytes < 1024) return "${bytes} B"
+		String[] units = ['KiB', 'MiB', 'GiB', 'TiB']
+		double value = bytes / 1024.0d
+		int unit = 0
+		while (value >= 1024.0d && unit < units.length - 1) { value /= 1024.0d; unit++ }
+		return String.format('%.1f %s', value, units[unit])
+	}
+}
+
+// Registered in the project that owns runClient: the workers reuse that task's resolved runtime
+// classpath, and Gradle only permits a configuration to be resolved by its own project's tasks.
+tasks.register('encode', EncodeTask) {
+	group = 'fabric'
+	description = 'Encode a directory of packet recordings into datasets using parallel Minecraft clients.'
+	profileDir.set(rootProject.layout.projectDirectory.dir('run'))
+	workRoot.set(rootProject.layout.buildDirectory.dir('encode'))
+	runTaskName.set('runClient')
+}
+
+// The workers reuse runClient's launch command, so they need everything runClient itself needs:
+// compiled and remapped classes, the generated launch config, and the downloaded assets.
+gradle.projectsEvaluated {
+	tasks.named('encode') { task ->
+		task.dependsOn tasks.getByName(task.runTaskName.get()).taskDependencies
+	}
+}

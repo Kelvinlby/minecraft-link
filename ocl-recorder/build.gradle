@@ -15,6 +15,9 @@ loom {
 	}
 }
 
+// Batch dataset encoder (`./gradlew encode`); lives here because it reuses this project's runClient.
+apply from: rootProject.file('gradle/encode.gradle')
+
 repositories {
 	mavenCentral()
 	maven { name = 'Xander'; url = 'https://maven.isxander.dev/releases' }

@@ -186,6 +186,52 @@ After a replay and its dataset save both succeed, the source session moves to `r
 Interrupted, incompatible, or failed sessions remain in `replay/` for inspection and retry. Output
 datasets are saved under `open-crafter-link/recording/`, just like live recordings.
 
+### Encode a batch in parallel
+
+From a clone of this repository, `encode` runs several development clients at once and splits a
+directory of packet recordings between them:
+
+```bash
+./gradlew encode --process 4 --input path/to/recordings --output path/to/datasets
+```
+
+`--process`, `--input`, and `--output` are required. Relative paths resolve against the repository
+root. Gradle's own command line claims `-p`, `-i`, and `-o`, so those three options have long forms
+only.
+
+Add `--nvidia` (or `-n`) on a machine whose monitor is attached to the integrated GPU, where GLX
+would otherwise put the clients on the iGPU or on software rendering. It runs each client with
+NVIDIA PRIME render offload:
+
+```bash
+./gradlew encode --process 4 --input path/to/recordings --output path/to/datasets --nvidia
+```
+
+```text
+__NV_PRIME_RENDER_OFFLOAD=1
+__GLX_VENDOR_LIBRARY_NAME=nvidia
+```
+
+The flag only sets those variables for the clients this task starts; it needs the proprietary NVIDIA
+driver, and has no effect on an AMD or Intel discrete GPU (use `DRI_PRIME=1` in the environment for
+those).
+
+Recordings are distributed by total size rather than by file count, so a few long sessions do not
+leave most clients idle. Each client runs in its own game directory under `build/encode/`, seeded
+from `run/`: the parts a client only reads are symlinked back to that profile, and the parts it
+writes are private, so the profile itself is never modified. Record dataset, auto replay, and quit
+when replay finished are forced on in each client's copy of the recorder config — the batch ends
+when the clients quit themselves — while codec, quality, sample rate, resolution, and the rendering
+overrides are taken from `run/config` unchanged.
+
+Recordings stay in `--input` until their encode succeeds, at which point the source moves to
+`<input>/done/` and its dataset is collected into `--output`. Anything a client could not encode is
+left in place and named in the failure summary, so the same command retries exactly those. Each
+client's console output is kept at `build/encode/w<n>/encode-console.log`.
+
+Running several clients multiplies the GPU and encoder load of a single replay, so the useful
+`--process` value is bounded by the machine rather than by the core count.
+
 ## Linux virtual cameras
 
 To publish both RGB and depth as cameras, install FFmpeg and `v4l2loopback`, then load two devices:
