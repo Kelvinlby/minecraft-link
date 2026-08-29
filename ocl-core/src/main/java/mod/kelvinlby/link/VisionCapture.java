@@ -15,6 +15,7 @@ import net.minecraft.client.texture.GlTexture;
 import org.lwjgl.opengl.GL30;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayDeque;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
@@ -23,22 +24,26 @@ import java.util.function.Supplier;
  * Real RGBD vision: reads the main framebuffer's colour + depth attachments on the render thread and
  * hands off compact, already-downsampled RGBD frames to the bridge.
  *
- * <p><b>Two capture seams per frame.</b> Depth is read at {@code WorldRenderEvents.END_MAIN} (the
- * terminal world-render phase), where the main framebuffer's depth attachment is fully written.
- * Colour, however, cannot be read there in every rendering environment: under Iris (shader packs) the
+ * <p><b>Three capture seams per frame.</b> {@code WorldRenderEvents.END_MAIN} claims and arms a capture,
+ * and reads world depth there. A render-tail hook then reads a second depth plane after first-person
+ * hands and held items have rendered but before Minecraft clears depth for the GUI. Finally, the
+ * <b>first HUD element</b> seam ({@code HudElementRegistry.addFirst}) reads colour. Minecraft clears
+ * depth between the world and hand passes, so the two depth planes are merged on read-back. Colour
+ * cannot be read at {@code END_MAIN} in every
+ * environment: under Iris (shader packs) the
  * world is rendered into Iris's own deferred G-buffers and only composited back onto MC's main
  * framebuffer colour attachment during Iris's post/composite passes, which run <em>after</em>
  * {@code END_MAIN}. At {@code END_MAIN} the colour texture would hold only the cleared sky colour. So
- * colour is instead read at the <b>first HUD element</b> seam ({@code HudElementRegistry.addFirst}),
- * which runs after the world + any shader composite but before any HUD overlay draws — valid in
- * vanilla and under Iris/Sodium alike, with no dependency on Iris classes. {@code END_MAIN} arms a
- * slot (issues the depth copy, records {@code far}/size); the HUD seam completes it (issues the colour
- * copy). See {@link #onWorldRenderEnd()} and {@link #onHudRenderFirst()}.
+ * the first HUD seam runs after the world, hands, and any shader composite but before any HUD overlay
+ * draws — valid in vanilla and under Iris/Sodium alike, with no dependency on Iris classes.
+ * {@code END_MAIN} records {@code far}/size and issues world depth; the render-tail hook issues hand
+ * depth; and the HUD seam issues matching colour. See {@link #onWorldRenderEnd()},
+ * {@link #onFirstPersonRenderEnd()}, and {@link #onHudRenderFirst()}.
  *
- * <p><b>The downsample happens on the GPU, before the read-back.</b> Both attachments are first blitted
+ * <p><b>The downsample happens on the GPU, before the read-back.</b> Each attachment plane is first blitted
  * into a small offscreen framebuffer at exactly the dataset resolution ({@link #ensureShrinkTargets}),
  * and only that is read back. At a 2560&times;1440 window feeding 768&times;432 frames this is the
- * difference between moving ~29 MB and ~2.6 MB across PCIe every single frame, and between the render
+ * difference between moving ~44 MB and ~4 MB across PCIe every single frame, and between the render
  * thread reading a full-res mapped buffer with a stride and memcpy-ing a handful of small rows. Reading
  * the full-res attachments instead used to be affordable only because eager replay wasted several
  * renders per sample, which gave the transfers somewhere to hide; once each render produces a sample,
@@ -56,7 +61,7 @@ import java.util.function.Supplier;
  * {@link EagerCaptureGate}. The window's sequence number is stamped onto the slot at claim time and
  * travels with the pixels all the way to the recorder, so several windows may be in flight at once
  * without the recorder having to guess which frame belongs to which sample. The gate is told the
- * capture is committed as soon as both copies are <em>issued</em> — GL executes them in command order,
+ * capture is committed as soon as all three copies are <em>issued</em> — GL executes them in command order,
  * so replay can advance the world for the next window immediately instead of stalling a whole render
  * frame (or more) waiting for the CPU to consume this one.
  *
@@ -67,14 +72,16 @@ import java.util.function.Supplier;
 public final class VisionCapture {
 	/**
 	 * Depth of the read-back ring. Deeper is better — it is how many read-backs can be in flight, and so
-	 * how much transfer latency the render thread can hide — but each slot costs two buffers the size of
-	 * one read-back. Downsampling on the GPU makes a slot ~2.6 MB instead of ~30 MB at a 1440p window, so
+	 * how much transfer latency the render thread can hide — but each slot costs three buffers the size of
+	 * one read-back. Downsampling on the GPU makes a slot ~4 MB instead of ~44 MB at a 1440p window, so
 	 * that path can afford a much deeper ring; the full-resolution fallback stays triple-buffered.
 	 */
 	private static final int RING_SHRUNK = 6;
 	private static final int RING_FULL = 3;
 	/** Eye-space near plane (blocks); GameRenderer's near plane is fixed at 0.05. */
 	private static final float NEAR = 0.05f;
+	/** Far plane used by GameRenderer's first-person projection in Minecraft 1.21.11. */
+	private static final float HAND_FAR = 100.0f;
 
 	/** Resolved live each frame so a bridge swap (settings save -&gt; reloadLink) doesn't orphan capture. */
 	private final Supplier<LinkBridge> bridge;
@@ -94,7 +101,7 @@ public final class VisionCapture {
 	private int pboH = -1;
 	private Slot[] ring;
 	/**
-	 * Slots with both copies issued, in issue order — which is the order the recorder must receive them
+	 * Slots with all copies issued, in issue order — which is the order the recorder must receive them
 	 * in. Iterating {@link #ring} by array index instead would publish a newer capture ahead of an older
 	 * one whenever both complete in the same frame, scrambling a dataset's video timeline. GL signals
 	 * fences in command order, so draining only from the head never leaves a ready slot waiting.
@@ -105,8 +112,9 @@ public final class VisionCapture {
 	/** Monotonic capture counter; stamped onto a slot at {@code END_MAIN} for cross-seam matching/debugging. */
 	private long frameCounter;
 	/**
-	 * The slot {@link #onWorldRenderEnd()} armed this frame (depth copy issued) that
-	 * {@link #onHudRenderFirst()} must complete with the colour copy. {@code null} when no slot is armed.
+	 * The slot {@link #onWorldRenderEnd()} armed this frame (world-depth copy issued) that the
+	 * first-person and HUD seams must complete with the hand-depth and colour copies.
+	 * {@code null} when no slot is armed.
 	 * Render thread only (both seams run on the render thread), so no synchronization is needed.
 	 */
 	private Slot armedSlot;
@@ -144,18 +152,24 @@ public final class VisionCapture {
 	private enum State {
 		/** Reusable — no capture in progress. */
 		FREE,
-		/** {@code END_MAIN} issued the depth copy; the HUD seam must still issue the colour copy. */
+		/** {@code END_MAIN} issued world depth; the render-tail hook must issue hand depth. */
+		AWAIT_HAND_DEPTH_ISSUE,
+		/** The render-tail hook issued hand depth; the HUD seam must issue colour. */
 		AWAIT_COLOR_ISSUE,
-		/** Both copies issued; drain once {@code colorReady && depthReady}. */
+		/** All three copies issued; drain once their ready flags are set. */
 		IN_FLIGHT
 	}
 
-	/** One ring entry: a colour + depth read-back buffer pair plus its cross-seam state. */
+	/** One ring entry: colour, world-depth, and hand-depth read-back buffers plus cross-seam state. */
 	private static final class Slot {
 		GpuBuffer color;
+		/** World depth captured before Minecraft clears depth for the first-person pass. */
 		GpuBuffer depth;
+		/** Hand/item depth captured after that clear; clear-value pixels reveal the world depth below. */
+		GpuBuffer handDepth;
 		volatile boolean colorReady;
 		volatile boolean depthReady;
+		volatile boolean handDepthReady;
 		State state = State.FREE;
 		long frameId;
 		/** Eager sample window this capture belongs to, or {@link EagerCaptureGate#NO_CAPTURE}. */
@@ -189,10 +203,10 @@ public final class VisionCapture {
 	/**
 	 * Seam A. Invoked from the {@code WorldRenderEvents.END_MAIN} callback (the context is unused — the
 	 * framebuffer and far plane come from {@link MinecraftClient}). Drains completed frames, makes the
-	 * once-per-frame throttle decision, and — if capturing this frame — issues the depth read-back and
-	 * <b>arms</b> a slot for {@link #onHudRenderFirst()} to complete with the colour read-back. The
-	 * colour attachment is deliberately <em>not</em> copied here: under Iris it holds only the cleared
-	 * sky colour until the post-composite passes that run after this seam. Runs on the render thread.
+	 * once-per-frame throttle decision, and — if capturing this frame — issues the world-depth read-back
+	 * and <b>arms</b> a slot for {@link #onHudRenderFirst()} to read hand depth and colour. Keeping world
+	 * depth here is necessary because Minecraft clears it before drawing the first-person pass. Colour
+	 * is deferred because it may not yet be composited under Iris. Runs on the render thread.
 	 */
 	public void onWorldRenderEnd() {
 		if (disposed) {
@@ -227,7 +241,7 @@ public final class VisionCapture {
 		drainReadySlots();
 
 		// If we armed a slot last frame but the HUD seam never fired (e.g. a pause/menu screen opened
-		// between END_MAIN and the HUD), reclaim it: skip that depth-only frame rather than emit it, and
+		// between END_MAIN and the HUD), reclaim it: skip that frame rather than emit it, and
 		// don't leak a ring slot.
 		if (armedSlot != null) {
 			OpenCrafterLink.LOGGER.debug("[open-crafter-link] vision: HUD seam missed frame {}; reclaiming slot", armedSlot.frameId);
@@ -271,11 +285,11 @@ public final class VisionCapture {
 		slot.frameId = ++frameCounter;
 		slot.colorReady = false;
 		slot.depthReady = false;
-		slot.state = State.AWAIT_COLOR_ISSUE;
+		slot.handDepthReady = false;
+		slot.state = State.AWAIT_HAND_DEPTH_ISSUE;
 
-		// Depth cannot go through MC's async copy (see readAttachment): we issue our own asynchronous
-		// glReadPixels into a read-back PBO and fence it, so the render thread never blocks — no frame-rate
-		// cost. The colour copy is issued at the HUD seam, once the composited image is present.
+		// Preserve world depth before GameRenderer clears the attachment for first-person rendering.
+		// Hand depth is captured separately at the HUD seam and overlaid during drain.
 		long start = System.nanoTime();
 		if (shrink) {
 			blitToShrink(depthTex, GlConst.GL_DEPTH_ATTACHMENT, GlConst.GL_DEPTH_BUFFER_BIT, w, h);
@@ -292,12 +306,55 @@ public final class VisionCapture {
 	}
 
 	/**
-	 * Seam B. Invoked from the first HUD element ({@code HudElementRegistry.addFirst}), after the world
-	 * and any shader-pack composite have been drawn to the main framebuffer's colour attachment but
-	 * before any HUD overlay — so the captured colour is the pure 3D scene. Completes the slot armed by
-	 * {@link #onWorldRenderEnd()} by issuing its asynchronous colour read-back. The {@code DrawContext}
-	 * / tick counter are unused: the framebuffer comes from {@link MinecraftClient} directly. Runs on the
-	 * render thread.
+	 * Seam B. Invoked at the tail of {@code GameRenderer.renderWorld}, after both main-hand and off-hand
+	 * first-person rendering (including bare arms), and immediately before {@code GameRenderer.render}
+	 * clears depth for GUI rendering. Issues the hand/item-only depth read-back. Runs on the render thread.
+	 */
+	public void onFirstPersonRenderEnd() {
+		if (disposed) {
+			return;
+		}
+		RenderSystem.assertOnRenderThread();
+
+		Slot slot = armedSlot;
+		if (slot == null || slot.state != State.AWAIT_HAND_DEPTH_ISSUE) {
+			return;
+		}
+
+		MinecraftClient mc = MinecraftClient.getInstance();
+		Framebuffer fb = mc.getFramebuffer();
+		GpuTexture depthTex = (fb != null) ? fb.getDepthAttachment() : null;
+		if (depthTex == null) {
+			armedSlot = null;
+			abandon(slot);
+			return;
+		}
+		if (depthTex.getWidth(0) != slot.srcW || depthTex.getHeight(0) != slot.srcH) {
+			armedSlot = null;
+			abandon(slot);
+			return;
+		}
+
+		long start = System.nanoTime();
+		if (slot.shrunk) {
+			blitToShrink(depthTex, GlConst.GL_DEPTH_ATTACHMENT, GlConst.GL_DEPTH_BUFFER_BIT,
+					slot.srcW, slot.srcH);
+			readAttachment(shrinkFbo, GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT,
+					slot.handDepth, slot.dstW, slot.dstH, () -> slot.handDepthReady = true);
+		} else {
+			attachToDepthFbo(depthTex);
+			readAttachment(depthFbo, GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT,
+					slot.handDepth, slot.srcW, slot.srcH, () -> slot.handDepthReady = true);
+			detachDepthFbo();
+		}
+		issueNs += System.nanoTime() - start;
+		slot.state = State.AWAIT_COLOR_ISSUE;
+	}
+
+	/**
+	 * Seam C. Invoked from the first HUD element ({@code HudElementRegistry.addFirst}), after the world,
+	 * first-person rendering, and any shader-pack composite, but before any HUD element is drawn. Issues
+	 * the matching asynchronous colour read-back. Runs on the render thread.
 	 */
 	public void onHudRenderFirst() {
 		if (disposed) {
@@ -308,20 +365,17 @@ public final class VisionCapture {
 		Slot slot = armedSlot;
 		armedSlot = null;
 		if (slot == null) {
-			return; // this frame was throttled, had no free slot, or capture is disabled — nothing to complete
+			return; // this frame was throttled, had no free slot, or capture is disabled
+		}
+		if (slot.state != State.AWAIT_COLOR_ISSUE) {
+			abandon(slot); // first-person seam did not run; never publish a mismatched frame
+			return;
 		}
 
 		MinecraftClient mc = MinecraftClient.getInstance();
 		Framebuffer fb = mc.getFramebuffer();
 		GpuTexture colorTex = (fb != null) ? fb.getColorAttachment() : null;
-		if (colorTex == null) {
-			// Abandon this frame; the depth copy already issued will simply be overwritten later.
-			abandon(slot);
-			return;
-		}
-		// The framebuffer changed size between the two seams (should not happen mid-frame): the depth PBO
-		// was sized for the old dimensions, so abandon rather than pair mismatched planes.
-		if (colorTex.getWidth(0) != slot.srcW || colorTex.getHeight(0) != slot.srcH) {
+		if (colorTex == null || colorTex.getWidth(0) != slot.srcW || colorTex.getHeight(0) != slot.srcH) {
 			abandon(slot);
 			return;
 		}
@@ -338,7 +392,7 @@ public final class VisionCapture {
 		issueNs += System.nanoTime() - start;
 		slot.state = State.IN_FLIGHT;
 		inFlightOrder.add(slot);
-		// Both copies are now in the command stream and can only observe this window's contents, so
+		// All three copies are now in the command stream and can only observe this window's contents, so
 		// replay may advance to the next sample immediately — the pixels catch up asynchronously.
 		if (slot.sampleSeq >= 0) {
 			eager.commit(slot.sampleSeq);
@@ -508,14 +562,14 @@ public final class VisionCapture {
 		shrinkH = -1;
 	}
 
-	/** Map + downsample every slot whose colour and depth copies have both completed. Render thread. */
+	/** Map + downsample every slot whose colour and two depth copies have completed. Render thread. */
 	private void drainReadySlots() {
 		if (ring == null) {
 			return;
 		}
 		CommandEncoder enc = RenderSystem.getDevice().createCommandEncoder();
 		for (Slot slot = inFlightOrder.peek(); slot != null; slot = inFlightOrder.peek()) {
-			if (!slot.colorReady || !slot.depthReady) {
+			if (!slot.colorReady || !slot.depthReady || !slot.handDepthReady) {
 				break; // the oldest capture is still in flight; later ones must wait behind it
 			}
 			inFlightOrder.poll();
@@ -530,6 +584,12 @@ public final class VisionCapture {
 				depth = slot.shrunk ? flipRows(dv.data(), slot.dstW, slot.dstH)
 						: downsampleDepth(dv.data(), slot.srcW, slot.srcH, slot.dstW, slot.dstH);
 			}
+			byte[] handDepth;
+			try (GpuBuffer.MappedView hdv = enc.mapBuffer(slot.handDepth, true, false)) {
+				handDepth = slot.shrunk ? flipRows(hdv.data(), slot.dstW, slot.dstH)
+						: downsampleDepth(hdv.data(), slot.srcW, slot.srcH, slot.dstW, slot.dstH);
+			}
+			overlayHandDepth(depth, handDepth, slot.far);
 			drainNs += System.nanoTime() - start;
 			long seq = slot.sampleSeq;
 			slot.sampleSeq = EagerCaptureGate.NO_CAPTURE;
@@ -539,10 +599,6 @@ public final class VisionCapture {
 		}
 	}
 
-	/**
-	 * Nearest-neighbour (or box-averaged) downsample of an RGBA8 source into a compact RGBA8 target,
-	 * flipping vertically so the output is top-left origin. Returns {@code targetW*targetH*4} bytes.
-	 */
 	/**
 	 * The GPU already produced a {@code dstW x dstH} image, so all that is left is GL's bottom-left
 	 * origin: copy whole rows in reverse into a top-left-origin array. One sequential {@code memcpy} per
@@ -558,6 +614,10 @@ public final class VisionCapture {
 		return out;
 	}
 
+	/**
+	 * Nearest-neighbour (or box-averaged) downsample of an RGBA8 source into a compact RGBA8 target,
+	 * flipping vertically so the output is top-left origin. Returns {@code targetW*targetH*4} bytes.
+	 */
 	private byte[] downsampleRgba(ByteBuffer src, int srcW, int srcH, int dstW, int dstH) {
 		byte[] out = new byte[dstW * dstH * 4];
 		if (boxFilter) {
@@ -645,6 +705,29 @@ public final class VisionCapture {
 	}
 
 	/**
+	 * Overlay the post-clear first-person depth plane on the preserved world plane. The hand pass starts
+	 * from an exact GL clear value of {@code 1.0}; every smaller value was written by a hand or held-item
+	 * fragment and must replace the otherwise corresponding RGB pixel's world depth. The hand pass uses
+	 * a 100-block far plane, so its values are reprojected into the world projection before the shared
+	 * bridge linearizes the merged plane with the world's far distance.
+	 */
+	static void overlayHandDepth(byte[] world, byte[] hand, float worldFar) {
+		ByteBuffer worldFloats = ByteBuffer.wrap(world).order(ByteOrder.LITTLE_ENDIAN);
+		ByteBuffer handFloats = ByteBuffer.wrap(hand).order(ByteOrder.LITTLE_ENDIAN);
+		for (int offset = 0; offset < world.length; offset += Float.BYTES) {
+			float handValue = handFloats.getFloat(offset);
+			if (handValue < 1.0f) {
+				float handNdc = handValue * 2.0f - 1.0f;
+				float handDenom = HAND_FAR + NEAR - handNdc * (HAND_FAR - NEAR);
+				float distance = 2.0f * NEAR * HAND_FAR / handDenom;
+				float worldNdc = (worldFar + NEAR - 2.0f * NEAR * worldFar / distance)
+						/ (worldFar - NEAR);
+				worldFloats.putFloat(offset, Math.max(0.0f, Math.min((worldNdc + 1.0f) * 0.5f, 1.0f)));
+			}
+		}
+	}
+
+	/**
 	 * (Re)allocate the read-back ring when the size being read back changes — the dataset resolution
 	 * when the GPU is doing the downsample, the framebuffer size when it is not. Render thread.
 	 */
@@ -667,6 +750,7 @@ public final class VisionCapture {
 			Slot slot = new Slot();
 			slot.color = device.createBuffer(() -> "ocl-vision-color", usage, colorBytes);
 			slot.depth = device.createBuffer(() -> "ocl-vision-depth", usage, depthBytes);
+			slot.handDepth = device.createBuffer(() -> "ocl-vision-hand-depth", usage, depthBytes);
 			fresh[i] = slot;
 		}
 		ring = fresh;
@@ -707,6 +791,9 @@ public final class VisionCapture {
 			}
 			if (slot.depth != null) {
 				slot.depth.close();
+			}
+			if (slot.handDepth != null) {
+				slot.handDepth.close();
 			}
 		}
 		ring = null;

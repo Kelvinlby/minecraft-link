@@ -27,7 +27,17 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public class OpenCrafterLinkClient implements ClientModInitializer {
 	private static LinkBridge bridge;
+	/** Active capture instance reached by the GameRenderer tail mixin. Render thread only. */
+	private static VisionCapture visionCapture;
 	private static final CopyOnWriteArrayList<Runnable> BEFORE_SHUTDOWN = new CopyOnWriteArrayList<>();
+
+	/** Called by the render hook after first-person hands/items and before Minecraft's GUI depth clear. */
+	public static void onFirstPersonRenderEnd() {
+		VisionCapture capture = visionCapture;
+		if (capture != null) {
+			capture.onFirstPersonRenderEnd();
+		}
+	}
 
 	/** Register optional dependent-mod cleanup that must run before vision and bridge teardown. */
 	public static void registerBeforeShutdown(Runnable cleanup) {
@@ -111,10 +121,10 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 		virtualCamera.syncTo(cfg.virtualCameraRgb, cfg.virtualCameraDepth,
 				cfg.cameraWidth, cfg.cameraHeight, LinkConfig.VISION_MAX_HZ, cfg.ffmpegPath);
 
-		// Vision: capture the 3D world (incl. first-person hand) across two seams within a frame — depth at
-		// END_MAIN (where the main framebuffer's depth is written), colour at the first HUD element (after
-		// the world + any shader-pack composite, before HUD overlays). This makes colour correct in vanilla
-		// and under Iris/Sodium alike (see VisionCapture). Frame resolution comes live from the in-game
+		// Vision: copy world depth at END_MAIN, hand depth immediately after first-person rendering, and
+		// colour at the first HUD element. Minecraft clears depth both before hands and before the GUI, so
+		// VisionCapture merges the two depth passes captured on either side of the first clear. Frame
+		// resolution comes live from the in-game
 		// settings screen (OclConfig), so adjusting the camera sliders takes effect without restarting; the
 		// ocl.visionWidth/Height launch properties, when set, pin it to a fixed override.
 		IntSupplier visionW = (LinkConfig.VISION_TARGET_W != null)
@@ -123,6 +133,7 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 				? LinkConfig.VISION_TARGET_H::intValue : () -> cfg.cameraHeight;
 		final VisionCapture vision = new VisionCapture(OpenCrafterLinkClient::bridge, visionW, visionH,
 				LinkConfig.VISION_MAX_HZ, LinkConfig.VISION_BOX_FILTER, CaptureGateRegistry.forwardingGate());
+		visionCapture = vision;
 		WorldRenderEvents.END_MAIN.register(ctx -> vision.onWorldRenderEnd());
 		HudElementRegistry.addFirst(Identifier.of(OpenCrafterLink.MOD_ID, "vision_capture"),
 				(context, tickCounter) -> vision.onHudRenderFirst());
@@ -133,6 +144,7 @@ public class OpenCrafterLinkClient implements ClientModInitializer {
 			runBeforeShutdown();
 			virtualCamera.shutdown(); // release the loopback devices before the process exits
 			vision.dispose();
+			visionCapture = null;
 			bridge().stop();
 		});
 		// JVM shutdown hook as a belt-and-suspenders for crashes that skip the lifecycle event. This
