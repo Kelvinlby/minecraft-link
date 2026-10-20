@@ -78,12 +78,24 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 	private volatile Channel instructionChannel;
 	private volatile Channel visionChannel;
 
+	/** Whether a controller is accepted on each outbound stream; read by the game threads. */
+	private volatile boolean telemetryClient;
+	private volatile boolean visionClient;
+
 	/**
-	 * Raw, already-downsampled framebuffer bytes handed render -&gt; vision worker (RGBA8 + DEPTH32).
-	 * {@code seq} is the eager-replay sample window this frame was captured for, or
-	 * {@link EagerCaptureGate#NO_CAPTURE} for ordinary conflated capture.
+	 * Raw, already-downsampled framebuffer bytes handed render -&gt; vision worker (RGBA8 + world and
+	 * hand DEPTH32). {@code seq} is the eager-replay sample window this frame was captured for, or
+	 * {@link EagerCaptureGate#NO_CAPTURE} for ordinary conflated capture. The arrays come from
+	 * {@link ReadbackPool} and go back to it once converted (or dropped).
 	 */
-	private record RawFrame(int width, int height, float near, float far, byte[] rgba, byte[] depth, long seq) {}
+	private record RawFrame(int width, int height, float near, float far, byte[] rgba, byte[] depth,
+			byte[] handDepth, long seq) {
+		void recycle() {
+			ReadbackPool.give(rgba);
+			ReadbackPool.give(depth);
+			ReadbackPool.give(handDepth);
+		}
+	}
 
 	// --------------------------------------------------------------------- //
 	// Lifecycle                                                             //
@@ -161,15 +173,30 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 	}
 
 	@Override
-	public final void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth, long seq) {
-		RawFrame frame = new RawFrame(w, h, near, far, rgba, depth, seq);
+	public final boolean hasTelemetryClient() {
+		return telemetryClient;
+	}
+
+	@Override
+	public final boolean hasVisionClient() {
+		return visionClient;
+	}
+
+	@Override
+	public final void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth,
+			byte[] handDepth, long seq) {
+		RawFrame frame = new RawFrame(w, h, near, far, rgba, depth, handDepth, seq);
 		if (seq >= 0) {
 			if (!visionRawEager.offer(frame)) {
 				OpenCrafterLink.LOGGER.error("[open-crafter-link] eager readback queue overflow; dropping sample {}", seq);
+				frame.recycle();
 				return;
 			}
 		} else {
-			visionRaw.set(frame);
+			RawFrame stale = visionRaw.getAndSet(frame);
+			if (stale != null) {
+				stale.recycle(); // conflated away before the worker got to it
+			}
 		}
 		LockSupport.unpark(visionWorkerThread);
 	}
@@ -202,12 +229,12 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 
 	private void senderLoop() {
 		serverSendLoop(this::openTelemetryServer, outbox, BinaryCodec::encodeOutbound,
-				ch -> telemetryChannel = ch, 1_000_000L /* ~1ms */);
+				ch -> telemetryChannel = ch, on -> telemetryClient = on, 1_000_000L /* ~1ms */);
 	}
 
 	private void visionSenderLoop() {
 		serverSendLoop(this::openVisionServer, visionOutbox, BinaryCodec::encodeVision,
-				ch -> visionChannel = ch, 2_000_000L /* ~2ms */);
+				ch -> visionChannel = ch, on -> visionClient = on, 2_000_000L /* ~2ms */);
 	}
 
 	/**
@@ -244,9 +271,9 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 	}
 
 	/**
-	 * Vision worker: drain the latest raw readback, convert RGBA8 -&gt; normalized RGB and DEPTH32 -&gt;
-	 * linearized far-normalized distance, then conflate the result for the vision sender. All heavy
-	 * per-pixel math lives here, off the render thread.
+	 * Vision worker: drain the latest raw readback, merge the hand depth, pack RGBA8 -&gt; RGB24 and
+	 * DEPTH32 -&gt; linearized far-normalized uint16 distance, then conflate the result for the vision
+	 * sender. All heavy per-pixel math lives here, off the render thread.
 	 */
 	private void visionWorkerLoop() {
 		try {
@@ -285,11 +312,13 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 	 * @param slot      conflating source; {@code getAndSet(null)} yields the newest queued payload
 	 * @param encoder   turns a payload into wire bytes ({@link BinaryCodec})
 	 * @param track     records the live channel so {@link #stop()} can close it to unblock
+	 * @param connected told whether a client is being streamed to, so producers can idle without one
 	 * @param idleNanos park time when the slot is empty (matches the per-stream cadence)
 	 */
 	private <T> void serverSendLoop(ServerChannelFactory server, AtomicReference<T> slot,
 			java.util.function.Function<T, byte[]> encoder,
-			java.util.function.Consumer<Channel> track, long idleNanos) {
+			java.util.function.Consumer<Channel> track,
+			java.util.function.Consumer<Boolean> connected, long idleNanos) {
 		while (running) {
 			ServerSocketChannel srv = null;
 			try {
@@ -304,12 +333,17 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 						// While streaming, the accepted socket—not the listener—is the channel whose write
 						// may block. Track it so stop() can always unblock the owning worker.
 						track.accept(client);
+						connected.accept(true);
+						// Producers idle while nobody is connected, so whatever sits in the slot predates this
+						// client; drop it and let the next fresh payload be the first one sent.
+						slot.set(null);
 						streamTo(client, slot, encoder, idleNanos);
 					} catch (IOException e) {
 						if (running) {
 							OpenCrafterLink.LOGGER.debug("[open-crafter-link] client stream ended", e);
 						}
 					} finally {
+						connected.accept(false);
 						if (running) track.accept(srv); // next iteration blocks in accept again
 					}
 				}
@@ -348,14 +382,16 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 		}
 	}
 
-	/** Write {@code u32-LE length + payload}. */
+	/**
+	 * Write {@code u32-LE length + payload} as one gathering write, so a multi-megabyte vision payload
+	 * is not copied into a second freshly allocated buffer just to prepend four bytes.
+	 */
 	protected static void writeFrame(SocketChannel ch, byte[] payload) throws IOException {
-		ByteBuffer buf = ByteBuffer.allocate(LEN_PREFIX + payload.length).order(ByteOrder.LITTLE_ENDIAN);
-		buf.putInt(payload.length);
-		buf.put(payload);
-		buf.flip();
-		while (buf.hasRemaining()) {
-			ch.write(buf);
+		ByteBuffer len = ByteBuffer.allocate(LEN_PREFIX).order(ByteOrder.LITTLE_ENDIAN);
+		len.putInt(payload.length).flip();
+		ByteBuffer[] bufs = {len, ByteBuffer.wrap(payload)};
+		while (bufs[1].hasRemaining()) {
+			ch.write(bufs);
 		}
 	}
 
@@ -390,24 +426,29 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 		return true;
 	}
 
-	/** Convert a raw readback into a wire-ready {@link VisionFrame} (off the render thread). */
+	/**
+	 * Convert a raw readback into a wire-ready {@link VisionFrame} (off the render thread), then hand
+	 * the raw planes back to {@link ReadbackPool} for the next capture.
+	 */
 	private static VisionFrame convert(RawFrame raw) {
 		int w = raw.width();
 		int h = raw.height();
 		int pixels = w * h;
+		float near = raw.near();
+		float far = raw.far();
 
-		float[] rgb = new float[pixels * 3];
+		VisionCapture.overlayHandDepth(raw.depth(), raw.handDepth(), far);
+
+		byte[] rgb24 = new byte[pixels * 3];
 		byte[] rgba = raw.rgba();
 		for (int p = 0, src = 0, dst = 0; p < pixels; p++, src += 4, dst += 3) {
-			rgb[dst]     = (rgba[src]     & 0xFF) / 255.0f;
-			rgb[dst + 1] = (rgba[src + 1] & 0xFF) / 255.0f;
-			rgb[dst + 2] = (rgba[src + 2] & 0xFF) / 255.0f;
+			rgb24[dst]     = rgba[src];
+			rgb24[dst + 1] = rgba[src + 1];
+			rgb24[dst + 2] = rgba[src + 2];
 			// alpha (src + 3) dropped
 		}
 
-		float near = raw.near();
-		float far = raw.far();
-		float[] depth = new float[pixels];
+		short[] depth16 = new short[pixels];
 		ByteBuffer db = ByteBuffer.wrap(raw.depth()).order(ByteOrder.LITTLE_ENDIAN);
 		float invFar = (far > 0.0f) ? 1.0f / far : 0.0f;
 		for (int p = 0; p < pixels; p++) {
@@ -415,11 +456,11 @@ public abstract class AbstractLinkBridge implements LinkBridge {
 			float zNdc = rawD * 2.0f - 1.0f;                 // -> NDC [-1,1]
 			float denom = far + near - zNdc * (far - near);
 			float zLinear = (denom != 0.0f) ? (2.0f * near * far) / denom : far; // eye-space blocks
-			float norm = zLinear * invFar;                   // normalize 0..1 by far
-			depth[p] = (norm < 0.0f) ? 0.0f : (Math.min(norm, 1.0f));
+			depth16[p] = VisionFrame.quantizeDepth(zLinear * invFar); // normalize 0..1 by far, uint16
 		}
 
-		return new VisionFrame(w, h, near, far, rgb, depth);
+		raw.recycle();
+		return new VisionFrame(w, h, near, far, rgb24, depth16);
 	}
 
 	// --------------------------------------------------------------------- //

@@ -37,8 +37,22 @@ public interface LinkBridge {
 	InventoryAction takeAction();
 
 	/**
+	 * Whether a controller is currently connected to the telemetry stream. Game threads use this to
+	 * skip building snapshots nobody will receive. Non-blocking.
+	 */
+	boolean hasTelemetryClient();
+
+	/**
+	 * Whether a controller is currently connected to the vision stream. {@link VisionCapture} skips
+	 * the GPU read-back entirely while neither this nor a local {@link VisionFrameBus} consumer wants
+	 * frames. Non-blocking.
+	 */
+	boolean hasVisionClient();
+
+	/**
 	 * Render thread: hand off raw, already-downsampled framebuffer bytes. O(1), non-blocking. The
-	 * worker does the float conversion + depth linearization off the render thread.
+	 * worker merges the hand depth, packs colour, and linearizes depth off the render thread. The bridge
+	 * takes ownership of the three arrays and recycles them once converted (see {@link ReadbackPool}).
 	 *
 	 * <p>Ordinary capture is conflating (newest wins): a live controller wants the freshest frame and
 	 * nothing else. A frame carrying an eager-replay sample sequence number
@@ -46,8 +60,11 @@ public interface LinkBridge {
 	 * captured window in order — see {@link mod.kelvinlby.link.VisionFrameBus}.
 	 *
 	 * @param rgba interleaved RGBA8, {@code w*h*4} bytes
-	 * @param depth DEPTH32 native-float bytes, {@code w*h*4} bytes
+	 * @param depth world DEPTH32 native-float bytes, {@code w*h*4} bytes
+	 * @param handDepth first-person DEPTH32 native-float bytes captured after Minecraft's hand-pass
+	 *                  depth clear, {@code w*h*4} bytes (see {@link VisionCapture#overlayHandDepth})
 	 * @param seq eager-replay sample sequence number, or {@link EagerCaptureGate#NO_CAPTURE}
 	 */
-	void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth, long seq);
+	void enqueueVisionRaw(int w, int h, float near, float far, byte[] rgba, byte[] depth, byte[] handDepth,
+			long seq);
 }

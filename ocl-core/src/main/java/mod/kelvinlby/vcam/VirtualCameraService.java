@@ -63,7 +63,10 @@ public final class VirtualCameraService {
 	private volatile boolean running;
 	private Thread clockThread;
 
-	/** Reused conversion scratch, sized on first use. Clock thread only. */
+	/**
+	 * The RGB plane to send (the frame's own immutable {@code rgb24}, already the sink's pixel format)
+	 * and the reused grayscale conversion scratch, sized on first use. Clock thread only.
+	 */
 	private byte[] rgbScratch;
 	private byte[] grayScratch;
 
@@ -350,25 +353,18 @@ public final class VirtualCameraService {
 			return false;
 		}
 		int pixels = width * height;
-		if (rgbScratch == null || rgbScratch.length != pixels * 3) {
-			rgbScratch = new byte[pixels * 3];
+		if (v.rgb24().length < pixels * 3 || v.depth16().length < pixels) {
+			return false;
 		}
+		rgbScratch = v.rgb24(); // already rgb24, and never mutated once published: send it as-is
 		if (grayScratch == null || grayScratch.length != pixels) {
 			grayScratch = new byte[pixels];
 		}
 
-		float[] rgb = v.rgb();
-		int n = Math.min(rgb.length, rgbScratch.length);
-		for (int i = 0; i < n; i++) {
-			int c = Math.round(rgb[i] * 255.0f);
-			rgbScratch[i] = (byte) (c < 0 ? 0 : Math.min(c, 255));
-		}
-
-		float[] depth = v.depth();
-		int m = Math.min(depth.length, grayScratch.length);
+		short[] depth = v.depth16();
 		float far = v.far();
-		for (int i = 0; i < m; i++) {
-			grayScratch[i] = depthToGray(depth[i], far);
+		for (int i = 0; i < pixels; i++) {
+			grayScratch[i] = depthToGray(depth[i] & 0xFFFF, far);
 		}
 		return true;
 	}
@@ -377,8 +373,8 @@ public final class VirtualCameraService {
 	private static final float DEPTH_NEAR_M = 0.1f;
 	/** Distance mapped to the darkest non-sky grey; everything beyond clips to it. */
 	private static final float DEPTH_FAR_M = 128.0f;
-	/** Normalized depth at/above which a pixel counts as sky rather than geometry. */
-	private static final float SKY_CUTOFF = 65530.0f / 65535.0f;
+	/** Quantized depth at/above which a pixel counts as sky rather than geometry. */
+	private static final int SKY_CUTOFF = 65530;
 	/** Flat grey for sky, dark enough to read as background without being crushed to black. */
 	private static final byte SKY_GRAY = (byte) 30;
 
@@ -386,7 +382,7 @@ public final class VirtualCameraService {
 	private static final float LOG_HI = (float) Math.log(DEPTH_FAR_M);
 
 	/**
-	 * One normalized depth sample to an 8-bit grey, using the same curve as the dataset visualizer's
+	 * One quantized depth sample (distance/far as uint16) to an 8-bit grey, using the same curve as the dataset visualizer's
 	 * {@code colorize_depth} (log distance between fixed clips, flat sky) but staying grayscale.
 	 *
 	 * <h2>Why the raw normalized value is unusable here</h2>
@@ -407,11 +403,11 @@ public final class VirtualCameraService {
 	 * rather than allowed to fall out of the curve, so the horizon reads as one region instead of
 	 * banding into the most distant geometry.
 	 */
-	private static byte depthToGray(float normalized, float far) {
-		if (normalized >= SKY_CUTOFF) {
+	private static byte depthToGray(int depth16, float far) {
+		if (depth16 >= SKY_CUTOFF) {
 			return SKY_GRAY;
 		}
-		float metres = Math.max(normalized * far, DEPTH_NEAR_M);
+		float metres = Math.max(depth16 * (far / 65535.0f), DEPTH_NEAR_M);
 		float t = ((float) Math.log(metres) - LOG_LO) / (LOG_HI - LOG_LO);
 		t = t < 0.0f ? 0.0f : Math.min(t, 1.0f);
 		int g = Math.round((1.0f - t) * 255.0f); // near = bright
