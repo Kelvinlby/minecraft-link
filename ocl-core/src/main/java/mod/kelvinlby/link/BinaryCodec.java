@@ -193,16 +193,10 @@ public final class BinaryCodec {
 		buf.putFloat(f.near());
 		buf.putFloat(f.far());
 
-		float[] rgb = f.rgb();
-		for (int i = 0; i < rgbLen; i++) buf.put((byte)Math.round(clamp01(rgb[i]) * 255.0f));
-		float[] depth = f.depth();
-		for (int i = 0; i < depthLen; i++) buf.putShort((short)Math.round(clamp01(depth[i]) * 65535.0f));
+		// The frame is already packed to wire precision, so both planes are bulk copies.
+		buf.put(f.rgb24(), 0, rgbLen);
+		buf.asShortBuffer().put(f.depth16(), 0, depthLen); // view shares the buffer's little-endian order
 		return buf.array();
-	}
-
-	private static float clamp01(float value) {
-		if (!Float.isFinite(value) || value <= 0.0f) return 0.0f;
-		return Math.min(value, 1.0f);
 	}
 
 	/**

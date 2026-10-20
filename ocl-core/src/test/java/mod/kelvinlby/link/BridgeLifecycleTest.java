@@ -23,7 +23,7 @@ class BridgeLifecycleTest {
 			peer.setReceiveBufferSize(1024);
 			int pixels = 1024 * 1024;
 			bridge.enqueueVisionRaw(1024, 1024, 0.05f, 256.0f,
-					new byte[pixels * 4], new byte[pixels * 4], EagerCaptureGate.NO_CAPTURE);
+					new byte[pixels * 4], new byte[pixels * 4], new byte[pixels * 4], EagerCaptureGate.NO_CAPTURE);
 			Thread.sleep(300L); // let the sender fill the peer's tiny receive window
 			assertTimeoutPreemptively(Duration.ofSeconds(2), bridge::stop);
 			Thread.sleep(50L);

@@ -53,8 +53,19 @@ import java.util.function.Supplier;
  * <p>The GPU&rarr;CPU copy is asynchronous; a small ring of read-back buffers ({@link #RING} deep) lets
  * the render thread issue a copy and pick up an earlier-completed one without ever blocking. Once a
  * slot's colour and depth reads have both signalled, its buffers are mapped and copied into compact
- * per-texel byte arrays. The heavy float conversion + depth linearization runs on the bridge's vision
- * worker ({@link LinkBridge#enqueueVisionRaw}).
+ * per-texel byte arrays recycled through {@link ReadbackPool}. The hand-depth merge, colour packing
+ * and depth linearization run on the bridge's vision worker ({@link LinkBridge#enqueueVisionRaw}).
+ *
+ * <p><b>Nothing is captured without a consumer.</b> Unless a controller is connected to the vision
+ * stream, a local {@link VisionFrameBus} consumer (recorder, virtual camera) is active, or eager replay
+ * owns the timeline, the seams return before touching the GPU, so an idle install costs nothing per
+ * frame.
+ *
+ * <p><b>No GL sync points on the hot path.</b> {@code glGetError} forces threaded GL drivers (NVIDIA's
+ * threaded optimization, Mesa glthread) to drain their command queue, stalling the render thread, so
+ * read-back errors are only checked for the first few captures after the ring is (re)built — enough
+ * to report an unsupported format once — and the shrink path queries the current framebuffer
+ * bindings once per seam rather than once per GL operation.
  *
  * <p><b>Eager replay pipelines through this ring.</b> Ordinary capture is rate-throttled; eager packet
  * replay instead captures exactly one frame per virtual sample window, arbitrated by
@@ -142,6 +153,10 @@ public final class VisionCapture {
 	/** Set if the shrink framebuffer cannot be built on this driver; capture falls back to full-res reads. */
 	private boolean shrinkUnavailable;
 
+	/** Read-backs left whose GL errors are still checked; reset when the ring is (re)built. */
+	private static final int GL_ERROR_CHECKS = 9; // three captures' worth of read-backs
+	private int glErrorChecksLeft;
+
 	/** Render-thread cost of the capture path, reported periodically while eager replay is running. */
 	private long issueNs;
 	private long drainNs;
@@ -213,6 +228,9 @@ public final class VisionCapture {
 			return;
 		}
 		RenderSystem.assertOnRenderThread();
+		if (ring == null && !eager.active() && !consumerWanted()) {
+			return; // nothing has ever wanted a frame: don't even allocate the read-back ring
+		}
 
 		MinecraftClient mc = MinecraftClient.getInstance();
 		Framebuffer fb = mc.getFramebuffer();
@@ -262,6 +280,9 @@ public final class VisionCapture {
 		if (!eagerActive && now - lastCaptureNs < minIntervalNs) {
 			return; // armedSlot already null: HUD seam will do nothing this frame
 		}
+		if (!eagerActive && !consumerWanted()) {
+			return; // no controller or local consumer: skip the GPU copies (in-flight ones still drained)
+		}
 
 		Slot slot = freeSlot();
 		if (slot == null) {
@@ -292,9 +313,8 @@ public final class VisionCapture {
 		// Hand depth is captured separately at the HUD seam and overlaid during drain.
 		long start = System.nanoTime();
 		if (shrink) {
-			blitToShrink(depthTex, GlConst.GL_DEPTH_ATTACHMENT, GlConst.GL_DEPTH_BUFFER_BIT, w, h);
-			readAttachment(shrinkFbo, GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT,
-					slot.depth, targetW, targetH, () -> slot.depthReady = true);
+			shrinkAndRead(depthTex, GlConst.GL_DEPTH_ATTACHMENT, GlConst.GL_DEPTH_BUFFER_BIT, w, h,
+					GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT, slot.depth, () -> slot.depthReady = true);
 		} else {
 			attachToDepthFbo(depthTex);
 			readAttachment(depthFbo, GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT,
@@ -337,10 +357,8 @@ public final class VisionCapture {
 
 		long start = System.nanoTime();
 		if (slot.shrunk) {
-			blitToShrink(depthTex, GlConst.GL_DEPTH_ATTACHMENT, GlConst.GL_DEPTH_BUFFER_BIT,
-					slot.srcW, slot.srcH);
-			readAttachment(shrinkFbo, GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT,
-					slot.handDepth, slot.dstW, slot.dstH, () -> slot.handDepthReady = true);
+			shrinkAndRead(depthTex, GlConst.GL_DEPTH_ATTACHMENT, GlConst.GL_DEPTH_BUFFER_BIT, slot.srcW, slot.srcH,
+					GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT, slot.handDepth, () -> slot.handDepthReady = true);
 		} else {
 			attachToDepthFbo(depthTex);
 			readAttachment(depthFbo, GlConst.GL_DEPTH_COMPONENT, GlConst.GL_FLOAT,
@@ -382,9 +400,8 @@ public final class VisionCapture {
 
 		long start = System.nanoTime();
 		if (slot.shrunk) {
-			blitToShrink(colorTex, GlConst.GL_COLOR_ATTACHMENT0, GlConst.GL_COLOR_BUFFER_BIT, slot.srcW, slot.srcH);
-			readAttachment(shrinkFbo, GlConst.GL_RGBA, GlConst.GL_UNSIGNED_BYTE,
-					slot.color, slot.dstW, slot.dstH, () -> slot.colorReady = true);
+			shrinkAndRead(colorTex, GlConst.GL_COLOR_ATTACHMENT0, GlConst.GL_COLOR_BUFFER_BIT, slot.srcW, slot.srcH,
+					GlConst.GL_RGBA, GlConst.GL_UNSIGNED_BYTE, slot.color, () -> slot.colorReady = true);
 		} else {
 			CommandEncoder enc = RenderSystem.getDevice().createCommandEncoder();
 			enc.copyTextureToBuffer(colorTex, slot.color, 0L, () -> slot.colorReady = true, 0);
@@ -397,6 +414,11 @@ public final class VisionCapture {
 		if (slot.sampleSeq >= 0) {
 			eager.commit(slot.sampleSeq);
 		}
+	}
+
+	/** Whether anyone outside eager replay would receive a captured frame right now. */
+	private boolean consumerWanted() {
+		return VisionFrameBus.isActive() || bridge.get().hasVisionClient();
 	}
 
 	/** Give up a claimed-but-unissued capture: free the slot and hand the window back to replay. */
@@ -477,13 +499,18 @@ public final class VisionCapture {
 
 	/**
 	 * Blit one of MC's full-resolution attachments into the matching attachment of the shrink
-	 * framebuffer, scaling it down to the dataset resolution. {@code GL_NEAREST} is required for depth
-	 * and keeps colour point-sampled, which is the same thing the CPU downsample did. Render thread only.
+	 * framebuffer, scaling it down to the dataset resolution, then issue the asynchronous read-back of
+	 * that shrunk attachment into {@code dst} (see {@link #readAttachment}). {@code GL_NEAREST} is
+	 * required for depth and keeps colour point-sampled, which is the same thing the CPU downsample did.
+	 * Both steps share one query of the caller's framebuffer bindings, which are restored exactly as
+	 * they were — the world is still being drawn into them. Render thread only.
 	 */
-	private void blitToShrink(GpuTexture source, int attachment, int mask, int srcW, int srcH) {
+	private void shrinkAndRead(GpuTexture source, int attachment, int mask, int srcW, int srcH,
+			int format, int type, GpuBuffer dst, Runnable onReady) {
 		if (depthFbo == 0) {
 			depthFbo = GlStateManager.glGenFramebuffers();
 		}
+		boolean checkErrors = beginErrorCheck();
 		int prevDraw = GL30.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
 		int prevRead = GL30.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
 		GlStateManager._glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, depthFbo);
@@ -491,12 +518,15 @@ public final class VisionCapture {
 				GlConst.GL_TEXTURE_2D, ((GlTexture) source).getGlId(), 0);
 		GlStateManager._glBindFramebuffer(GlConst.GL_DRAW_FRAMEBUFFER, shrinkFbo);
 		GlStateManager._glBlitFrameBuffer(0, 0, srcW, srcH, 0, 0, shrinkW, shrinkH, mask, GlConst.GL_NEAREST);
-		// Never hold a reference to MC's attachment across frames, and hand the caller's targets back
-		// exactly as they were — the world is still being drawn into them.
+		// Never hold a reference to MC's attachment across frames.
 		GlStateManager._glFramebufferTexture2D(GlConst.GL_READ_FRAMEBUFFER, attachment,
 				GlConst.GL_TEXTURE_2D, 0, 0);
 		GlStateManager._glBindFramebuffer(GlConst.GL_DRAW_FRAMEBUFFER, prevDraw);
+
+		GlStateManager._glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, shrinkFbo);
+		issueReadPixels(format, type, dst, shrinkW, shrinkH, onReady);
 		GlStateManager._glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, prevRead);
+		endErrorCheck(checkErrors);
 	}
 
 	/** Attach MC's depth texture to our own read framebuffer (full-resolution fallback path). */
@@ -529,16 +559,42 @@ public final class VisionCapture {
 	 * depth) and colour as RGBA8, both bottom-row first. Render thread only.
 	 */
 	private void readAttachment(int fbo, int format, int type, GpuBuffer dst, int w, int h, Runnable onReady) {
-		GlStateManager.clearGlErrors();
+		boolean checkErrors = beginErrorCheck();
 		int prevRead = GL30.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
 		GlStateManager._glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, fbo);
+		issueReadPixels(format, type, dst, w, h, onReady);
+		GlStateManager._glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, prevRead);
+		endErrorCheck(checkErrors);
+	}
+
+	/** {@code glReadPixels} from the bound read framebuffer into the {@code dst} PBO, plus its fence. */
+	private void issueReadPixels(int format, int type, GpuBuffer dst, int w, int h, Runnable onReady) {
 		GlStateManager._glBindBuffer(GlConst.GL_PIXEL_PACK_BUFFER, ((GlGpuBuffer) dst).id);
 		GlStateManager._pixelStore(GlConst.GL_PACK_ROW_LENGTH, w);
 		GlStateManager._readPixels(0, 0, w, h, format, type, 0L);
 		RenderSystem.queueFencedTask(onReady);
 		GlStateManager._pixelStore(GlConst.GL_PACK_ROW_LENGTH, 0); // back to "tightly packed" for everyone else
-		GlStateManager._glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, prevRead);
 		GlStateManager._glBindBuffer(GlConst.GL_PIXEL_PACK_BUFFER, 0);
+	}
+
+	/**
+	 * Whether this read-back should be checked for GL errors, clearing any stale ones first if so. Only
+	 * the first few read-backs after a ring rebuild are checked: {@code glGetError} is a full driver sync
+	 * under threaded GL, and a format the driver rejects fails identically every frame anyway.
+	 */
+	private boolean beginErrorCheck() {
+		if (glErrorChecksLeft <= 0) {
+			return false;
+		}
+		glErrorChecksLeft--;
+		GlStateManager.clearGlErrors();
+		return true;
+	}
+
+	private void endErrorCheck(boolean checkErrors) {
+		if (!checkErrors) {
+			return;
+		}
 		int err = GlStateManager._getError();
 		if (err != 0) {
 			OpenCrafterLink.LOGGER.warn("[open-crafter-link] read-back glReadPixels failed: GL error {}", err);
@@ -562,7 +618,11 @@ public final class VisionCapture {
 		shrinkH = -1;
 	}
 
-	/** Map + downsample every slot whose colour and two depth copies have completed. Render thread. */
+	/**
+	 * Map + copy out every slot whose colour and two depth copies have completed. Render thread. Only
+	 * the unavoidable copy out of mapped GPU memory happens here; merging and converting the planes is
+	 * the vision worker's job.
+	 */
 	private void drainReadySlots() {
 		if (ring == null) {
 			return;
@@ -589,12 +649,11 @@ public final class VisionCapture {
 				handDepth = slot.shrunk ? flipRows(hdv.data(), slot.dstW, slot.dstH)
 						: downsampleDepth(hdv.data(), slot.srcW, slot.srcH, slot.dstW, slot.dstH);
 			}
-			overlayHandDepth(depth, handDepth, slot.far);
 			drainNs += System.nanoTime() - start;
 			long seq = slot.sampleSeq;
 			slot.sampleSeq = EagerCaptureGate.NO_CAPTURE;
 			slot.state = State.FREE; // free immediately for reuse
-			bridge.get().enqueueVisionRaw(slot.dstW, slot.dstH, NEAR, slot.far, rgba, depth, seq);
+			bridge.get().enqueueVisionRaw(slot.dstW, slot.dstH, NEAR, slot.far, rgba, depth, handDepth, seq);
 			reportCaptureCost();
 		}
 	}
@@ -607,7 +666,7 @@ public final class VisionCapture {
 	 */
 	private byte[] flipRows(ByteBuffer src, int dstW, int dstH) {
 		int rowBytes = dstW * 4;
-		byte[] out = new byte[rowBytes * dstH];
+		byte[] out = ReadbackPool.take(rowBytes * dstH);
 		for (int ty = 0; ty < dstH; ty++) {
 			src.get((dstH - 1 - ty) * rowBytes, out, ty * rowBytes, rowBytes);
 		}
@@ -619,7 +678,7 @@ public final class VisionCapture {
 	 * flipping vertically so the output is top-left origin. Returns {@code targetW*targetH*4} bytes.
 	 */
 	private byte[] downsampleRgba(ByteBuffer src, int srcW, int srcH, int dstW, int dstH) {
-		byte[] out = new byte[dstW * dstH * 4];
+		byte[] out = ReadbackPool.take(dstW * dstH * 4);
 		if (boxFilter) {
 			for (int ty = 0; ty < dstH; ty++) {
 				for (int tx = 0; tx < dstW; tx++) {
@@ -691,7 +750,7 @@ public final class VisionCapture {
 	 * Returns {@code targetW*targetH*4} bytes.
 	 */
 	private byte[] downsampleDepth(ByteBuffer src, int srcW, int srcH, int dstW, int dstH) {
-		byte[] out = new byte[dstW * dstH * 4];
+		byte[] out = ReadbackPool.take(dstW * dstH * 4);
 		ByteBuffer dst = ByteBuffer.wrap(out).order(src.order()); // verbatim 4-byte copy, as above
 		int[] columns = columnMap(srcW, dstW);
 		for (int ty = 0; ty < dstH; ty++) {
@@ -709,7 +768,7 @@ public final class VisionCapture {
 	 * from an exact GL clear value of {@code 1.0}; every smaller value was written by a hand or held-item
 	 * fragment and must replace the otherwise corresponding RGB pixel's world depth. The hand pass uses
 	 * a 100-block far plane, so its values are reprojected into the world projection before the shared
-	 * bridge linearizes the merged plane with the world's far distance.
+	 * bridge linearizes the merged plane with the world's far distance. Runs on the vision worker.
 	 */
 	static void overlayHandDepth(byte[] world, byte[] hand, float worldFar) {
 		ByteBuffer worldFloats = ByteBuffer.wrap(world).order(ByteOrder.LITTLE_ENDIAN);
@@ -756,6 +815,7 @@ public final class VisionCapture {
 		ring = fresh;
 		pboW = w;
 		pboH = h;
+		glErrorChecksLeft = GL_ERROR_CHECKS;
 		lastCaptureNs = 0L;
 		armedSlot = null; // any slot armed before the resize belonged to the old ring
 	}

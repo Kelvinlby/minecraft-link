@@ -19,8 +19,8 @@ import java.util.concurrent.locks.LockSupport;
  * the newest RGBD frame ({@link VisionFrameBus#latest()}) together with the current action set
  * ({@link ActionReader#current()}) into one {@link Sample}, and hands it to a second writer thread via
  * a bounded queue. A separate writer thread does the video encode + disk I/O so it never stalls the
- * clock. Frames are packed to their storage precision ({@link PackedFrame}) on the clock thread, so a
- * queued sample holds compact bytes, not raw floats.
+ * clock. Frames already arrive in their storage precision and are only wrapped as a {@link PackedFrame},
+ * so a queued sample holds compact bytes, not raw floats.
  *
  * <h2>Why not reuse the streaming handoff</h2>
  * The link's vision path is conflating (drops frames under load), which is wrong for a recorder that

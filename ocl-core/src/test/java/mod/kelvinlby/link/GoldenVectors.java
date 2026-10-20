@@ -110,7 +110,7 @@ public final class GoldenVectors {
 			int h = o.get("h").getAsInt();
 			float[] rgb = readFloatArray(o.getAsJsonArray("rgb"));
 			float[] depth = readFloatArray(o.getAsJsonArray("depth"));
-			VisionFrame frame = new VisionFrame(w, h, o.get("near").getAsFloat(), o.get("far").getAsFloat(), rgb, depth);
+			VisionFrame frame = VisionFrame.fromNormalized(w, h, o.get("near").getAsFloat(), o.get("far").getAsFloat(), rgb, depth);
 			out.add(new OclvCase(o.get("name").getAsString(), o.get("bin").getAsString(), frame));
 		}
 		return out;

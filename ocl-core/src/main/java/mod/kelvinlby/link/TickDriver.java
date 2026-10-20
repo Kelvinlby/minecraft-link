@@ -26,7 +26,11 @@ public final class TickDriver {
 		if (player == null || mc.world == null) {
 			return; // not in a world; nothing to report
 		}
-		bridge.get().publish(buildSnapshot(mc, player));
+		LinkBridge link = bridge.get();
+		if (!link.hasTelemetryClient()) {
+			return; // nobody listening: skip walking the inventory; a connecting controller gets the next tick
+		}
+		link.publish(buildSnapshot(mc, player));
 	}
 
 	private OutboundSnapshot buildSnapshot(MinecraftClient mc, ClientPlayerEntity player) {
