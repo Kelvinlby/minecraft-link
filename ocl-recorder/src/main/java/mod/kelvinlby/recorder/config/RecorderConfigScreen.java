@@ -42,7 +42,8 @@ public final class RecorderConfigScreen {
 						+ " Auto replay always leaves the recipe book enabled.",
 				defaults.disableRecipeBookWhileRecording, () -> cfg.disableRecipeBookWhileRecording,
 				v -> cfg.disableRecipeBookWhileRecording = v, !cfg.autoReplay);
-		autoReplay.addListener((option, value) -> {
+		autoReplay.addEventListener((option, event) -> {
+			boolean value = option.pendingValue();
 			eager.setAvailable(option.available() && value);
 			quit.setAvailable(option.available() && value);
 			disableRecipeBook.setAvailable(!value);
@@ -51,7 +52,8 @@ public final class RecorderConfigScreen {
 		Option<Boolean> enabled = boolOption("Record dataset",
 				"Record each joined world, or run pending packet replays when Auto replay is enabled.",
 				defaults.recordDataset, () -> cfg.recordDataset, v -> cfg.recordDataset = v, true);
-		enabled.addListener((option, value) -> {
+		enabled.addEventListener((option, event) -> {
+			boolean value = option.pendingValue();
 			autoReplay.setAvailable(value);
 			eager.setAvailable(value && autoReplay.pendingValue());
 			quit.setAvailable(value && autoReplay.pendingValue());
@@ -74,7 +76,7 @@ public final class RecorderConfigScreen {
 		Option<Boolean> overrideGamma = boolOption("Override gamma",
 				"Use the configured gamma during ordinary gameplay and recording.", defaults.overrideGamma,
 				() -> cfg.overrideGamma, v -> cfg.overrideGamma = v, true);
-		overrideGamma.addListener((option, value) -> gamma.setAvailable(value));
+		overrideGamma.addEventListener((option, event) -> gamma.setAvailable(option.pendingValue()));
 
 		ConfigCategory.Builder recording = ConfigCategory.createBuilder().name(Text.literal("Recording"))
 				.option(enabled).option(sampleRate).option(disableRecipeBook);

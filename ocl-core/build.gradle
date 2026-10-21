@@ -33,8 +33,9 @@ dependencies {
 }
 
 processResources {
-	inputs.property 'version', project.version
-	filesMatching('fabric.mod.json') { expand version: project.version }
+	def modVersion = project.version
+	inputs.property 'version', modVersion
+	filesMatching('fabric.mod.json') { expand version: modVersion }
 }
 
 tasks.withType(JavaCompile).configureEach { options.release = 21 }
@@ -57,7 +58,8 @@ java {
 	targetCompatibility = JavaVersion.VERSION_21
 }
 
-jar { from(rootProject.file('LICENSE')) { rename { "${it}_${project.name}" } } }
+def licenseSuffix = project.name
+jar { from(rootProject.file('LICENSE')) { rename { "${it}_${licenseSuffix}" } } }
 
 publishing {
 	publications { create('mavenJava', MavenPublication) { from components.java } }
